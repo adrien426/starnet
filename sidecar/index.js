@@ -216,6 +216,7 @@ const ProspectGen = require('../frontend/app/prospect.js'); // SCOUT: the pure p
 const SharedSpecialties = require('../shared/specialties.js');           // SCOUT: builtin class catalog (prospect dedup + context)
 const RecipeCatalogAll = require('../frontend/app/recipe-catalog/index.js'); // SCOUT: builtin recipe catalog (draft dedup + context)
 const { makeAutoNotifier } = require('./autonotify.js');   // B4: ping a connected channel when a cron run produces work
+const { makeRevenueNotifier } = require('./revenue-notify.js');   // ping a connected channel on real revenue / a coded kill verdict
 const configExport = require('./configexport.js');   // P1-7: station backup — export/import/reset (pure shape+redaction; index wires the live stores)
 const harnessImport = require('./harness-import.js'); // IMPORT-AN-AGENT: read-only OpenClaw/Hermes home -> normalized preview (pure; index does the fs)
 const { writeFileDurable: writeFileDurableRaw } = require('./durable-write.js'); // G4.2: crash-safe atomic+durable single-file replace (fsync-before-rename)
@@ -4655,15 +4656,25 @@ function channelLiveHealth(channel) {
   if (!channel || channel === 'telegram') return telegramStatus || { connected: false, state: 'down' };
   return genericStatus[channel] || { connected: false, state: 'down' };
 }
+// Shared by every host-composed notifier (autoNotifier, revenueNotifier, …): the SAME live-channel send +
+// SAME global opt-in-gated chat lookup, so "which chats get pinged" and "does a send count as delivered"
+// can never drift between notifiers that are otherwise independent event watchers.
+function notifySendTo(chatId, text, channel) {
+  const ch = liveChannelFor(channel);
+  const p = (ch && ch.adapter) ? ch.adapter.send(chatId, redact(text)) : Promise.resolve({ ok: false, error: 'channel not connected' });
+  // DELIVERY HONESTY (2026-07-15 audit): transports NEVER throw — a failure is a resolved { ok:false,
+  // error } SendResult. Normalize that to a rejection so a notifier's per-send outcome reporting
+  // sees a failed ping as a failure instead of a phantom success.
+  return Promise.resolve(p).then(r => { if (r && r.ok === false) throw new Error(String(r.error || 'send failed')); return r; });
+}
+function notifyChatsFor(agentId) {
+  if (!(channelSecrets && channelSecrets.notifyAutonomous)) return [];   // global opt-in gate (default off — anti-spam)
+  // rec.chatId (multi-bot telegram): a bot-scoped record's KEY is namespaced ('<botId>|<chatId>') — the real
+  // chatId rides on the record; legacy records keep key==chatId.
+  try { const map = channelStore.loadChatMap(); return Object.keys(map.chats || {}).filter(cid => map.chats[cid] && map.chats[cid].agentId === agentId).map(cid => ({ chatId: (map.chats[cid] && map.chats[cid].chatId) || cid, channel: (map.chats[cid] && map.chats[cid].channel) || 'telegram' })); } catch (_) { return []; }
+}
 const autoNotifier = makeAutoNotifier({
-  send: (chatId, text, channel) => {
-    const ch = liveChannelFor(channel);
-    const p = (ch && ch.adapter) ? ch.adapter.send(chatId, redact(text)) : Promise.resolve({ ok: false, error: 'channel not connected' });
-    // DELIVERY HONESTY (2026-07-15 audit): transports NEVER throw — a failure is a resolved { ok:false,
-    // error } SendResult. Normalize that to a rejection so the notifier's per-send outcome reporting
-    // (onDelivery below) sees a failed ping as a failure instead of a phantom success.
-    return Promise.resolve(p).then(r => { if (r && r.ok === false) throw new Error(String(r.error || 'send failed')); return r; });
-  },
+  send: notifySendTo,
   // DELIVERY OUTCOME (2026-07-15 audit): persist every notification attempt's result on the job record
   // (lastDeliveryAt/Ok/Error via the markDelivery reducer, under the cron write lock) and warn loudly on a
   // failure — previously a dead ping vanished: the routine "succeeded" but nobody was ever told. Fire-and-
@@ -4672,15 +4683,14 @@ const autoNotifier = makeAutoNotifier({
     if (!(result && result.ok)) console.warn('[cron] notification delivery FAILED for routine ' + jobId + ':', (result && result.error) || 'unknown', result && result.channel ? '[' + result.channel + ']' : '');
     Promise.resolve().then(() => withCronWrite(jobs => cronStore.markDelivery(jobs, jobId, result, { now: Date.now() }))).catch(e => console.warn('[cron] delivery-outcome persist failed:', (e && e.message) || e));
   },
-  chatsFor: (agentId) => {
-    if (!(channelSecrets && channelSecrets.notifyAutonomous)) return [];   // global opt-in gate (default off — anti-spam)
-    // rec.chatId (multi-bot telegram): a bot-scoped record's KEY is namespaced ('<botId>|<chatId>') — the real
-    // chatId rides on the record; legacy records keep key==chatId.
-    try { const map = channelStore.loadChatMap(); return Object.keys(map.chats || {}).filter(cid => map.chats[cid] && map.chats[cid].agentId === agentId).map(cid => ({ chatId: (map.chats[cid] && map.chats[cid].chatId) || cid, channel: (map.chats[cid] && map.chats[cid].channel) || 'telegram' })); } catch (_) { return []; }
-  },
+  chatsFor: notifyChatsFor,
   jobName: (jobId) => { const j = (cronJobs || []).find(x => x && x.id === jobId); return (j && j.name) || 'a routine'; },
   jobAgent: (jobId) => { const j = (cronJobs || []).find(x => x && x.id === jobId); return (j && j.agentId) || null; }
 });
+// Same opt-in gate + live send as autoNotifier above, watching 'revenue.event' instead of 'cron.result' — see
+// revenue-notify.js. Fired directly by the revenue webhook/ingest handlers right after a successful record
+// (no generic event bus needed: those handlers already hold everything the message needs).
+const revenueNotifier = makeRevenueNotifier({ send: notifySendTo, chatsFor: notifyChatsFor });
 // NS-0: fold a cron.fire / cron.skipped into the durable autonomy ledger — the ONE place every cron decision
 // already flows through (cronEmitNotify), so fire/skip/defer are recorded without threading a store into the
 // pure driver. A cron.skipped whose reason is 'at-capacity' is the DEFER kind (held back, still due); every
@@ -19475,6 +19485,16 @@ function revenueEventFromStripe(event) {
    this app is loopback-pinned by design (see apiauth.js's threat model), not itself a public endpoint.
    Fails CLOSED on a persistence error (503, so Stripe retries): an accepted sale that never reached disk is a
    lost dollar, unlike the ordinary fail-open writes elsewhere in this file. */
+// Fire the Telegram/Discord/… ping (revenue-notify.js) right after a row durably lands. Fire-and-forget and
+// exception-swallowed: a notification is never allowed to turn a successful write into a failed HTTP response,
+// and the notifier itself already never throws (see its own try/catch) — this is a second, redundant floor.
+function notifyRevenueRow(row) {
+  try {
+    const verdict = revenueLedger.verdict(row.agentId);
+    revenueNotifier.onEvent('revenue.event', { agentId: row.agentId, hypothesis: row.hypothesis, source: row.source, revenueCents: row.revenueCents, costCents: row.costCents, verdict });
+  } catch (e) { failNote('revenue.notifyRow', e); }
+}
+
 async function handleRevenueWebhookStripe(req, res) {
   const json = (code, value) => respondJson(res, code, value);
   let raw; try { raw = await readBody(req, 1 << 20, res); } catch (_) { return; }
@@ -19485,6 +19505,7 @@ async function handleRevenueWebhookStripe(req, res) {
   if (!row) return json(202, { ok: true, recorded: false, reason: 'no agentId metadata or unhandled event type' });
   try { revenueLedger.recordStrict(row); }
   catch (e) { return json(503, { error: 'revenue event could not be recorded' }); }
+  notifyRevenueRow(row);
   json(200, { ok: true, recorded: true, id: row.id });
 }
 
@@ -19504,6 +19525,7 @@ async function handleRevenueEventIngest(req, res) {
       revenueCents: body.revenueCents, costCents: body.costCents, occurredAt: body.occurredAt, raw: body.raw
     });
   } catch (e) { return json(503, { error: 'revenue event could not be recorded' }); }
+  notifyRevenueRow(row);
   json(200, { ok: true, id: row.id });
 }
 
