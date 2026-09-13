@@ -70,6 +70,9 @@ Subsystem / feature plans:
   `FABLE_MARCHING_ORDERS_2026-07-03.md`, `AWAY_WORKSHOP_PLAN.md`.
 - Session/loop & task packs: `STARNET_SESSION_LOOPS_1_6.md`, `STARNET_BUG_FINDING_LOOPS.md`,
   `STARNET_DOGFOOD_TASK_PACK.md`, `STARNET_PHASE5_REF_WORKLOADS.md`.
+- `AUTONOMOUS_BUSINESS_LOOP_PLAN.md` — external audit + build spec for a scout/orchestrator/revenue
+  loop that spawns and kills business agents on real revenue data; the revenue connector and the
+  publish-grant wall are the two blocking gaps.
 
 ## Audits & QA reports (dated, historical)
 
