@@ -271,7 +271,12 @@
       // create or alter future autonomous work. Model tools never accept the host-run check command.
       { capId: 'orchestrator', tool: 'loop.list', scope: 'read', requiresConsent: false, network: false },
       { capId: 'orchestrator', tool: 'loop.create', scope: 'write', requiresConsent: true, network: false },
-      { capId: 'orchestrator', tool: 'loop.manage', scope: 'write', requiresConsent: true, network: false }
+      { capId: 'orchestrator', tool: 'loop.manage', scope: 'write', requiresConsent: true, network: false },
+      // REVENUE STATUS: the coded keep/kill verdict for a business agent, from real revenue_events (never the
+      // model's own impression). Read-only and reaches no network (it queries the local revenue ledger, not a
+      // payment provider), so it carries the same trust class as team.subagents/session.peek above — no consent
+      // gate. Lead-only like the rest of orchestration (see tools/builtin/revenue.js).
+      { capId: 'orchestrator', tool: 'revenue_status', scope: 'read', requiresConsent: false, network: false }
     ],
     // STUDIO (media skills): text->image generation + image vision analysis, both on the SAME BYOK OpenRouter
     // key the agent already uses (no new provider). image_generate WRITES a file into the agent's workspace, so

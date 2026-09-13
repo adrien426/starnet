@@ -19,6 +19,8 @@ const DomainTask = require('./domain-task.js');
 const ImageTask = require('./image-task.js');
 const { makeCostEngine } = require('./cost.js');
 const { makeLedger } = require('./ledger.js');
+const { makeRevenueLedger } = require('./revenue-ledger.js');
+const { makeStripeWebhookVerifier } = require('./revenue-webhook.js');
 const { makeBudget } = require('./budget.js');
 const { makeCredits } = require('./credits.js');   // managed-credit backend adapter (inert unless STARNET_CREDITS_URL is set)
 const { makeCreditsLink } = require('./credits-link.js');   // device-pairing client + durable link config (inert unless STARNET_CLOUD_URL is set)
@@ -63,6 +65,7 @@ const { makeCodeTools } = CodeMode;
 const { makeSkillTools } = require('./tools/builtin/skills.js');    // H4: the agent's reusable skill library tools
 const Todo = require('./tools/builtin/todo.js');
 const DeliverableTool = require('./tools/builtin/deliverable.js');   // deliverable_note — the agent NAMES its finished work (prose only; never status/crew)
+const RevenueTool = require('./tools/builtin/revenue.js');   // revenue_status — the CODED keep/kill verdict on a business agent's real revenue
 const { makeImageTools } = require('./tools/builtin/image.js');           // STUDIO: image_generate / image_analyze (OpenRouter multimodal)
 const { makeConnectorTools } = require('./tools/builtin/connectors.js');  // WEB: connectors.list — what the station HAS wired, and what it could (read-only, no secrets)
 const { makeVoiceTools } = require('./tools/builtin/voice.js');           // STUDIO: voice_generate — speech saved into the workspace as a playable clip
@@ -912,6 +915,24 @@ const ledgerIo = {
 };
 const ledger = makeLedger({ io: ledgerIo, clock: { now: () => Date.now() } });
 const budget = makeBudget({ caps: { agent: BUDGET_CAPS.perAgent, day: BUDGET_CAPS.perDay, global: BUDGET_CAPS.global }, ledger, clock: { now: () => Date.now() } });
+
+/* ---- revenue ledger (docs/AUTONOMOUS_BUSINESS_LOOP_PLAN.md's blocking connector) ----
+   Append-only JSONL of settled sale/refund/cost events, same P3 bounded-boot-load + rotation discipline as the
+   spend ledger above. Unlike the spend ledger's fail-open append, the WEBHOOK handler below calls recordStrict
+   (throws on a failed append) — an accepted sale that silently failed to persist is a lost dollar, so that path
+   fails closed (503, the sender retries) rather than 200 a phantom write. */
+const REVENUE_EVENTS_FILE = path.join(WORKSPACES, 'revenue-events.jsonl');
+const revenueIo = {
+  readAll() { try { return readBoundedJsonl(REVENUE_EVENTS_FILE); } catch (e) { return []; } },
+  append(entry) {
+    appendJsonlDurable({ fs: fs, note: failNote }, REVENUE_EVENTS_FILE, entry);   // throws on failure — callers decide fail-open vs fail-closed
+    rotateJsonl(REVENUE_EVENTS_FILE);
+  }
+};
+const revenueLedger = makeRevenueLedger({ io: revenueIo, clock: { now: () => Date.now() } });
+// Stripe's own HMAC over the endpoint's signing secret — NOT the relay webhook's StarNet token+nonce scheme
+// (Stripe's servers cannot carry this station's per-launch token). See revenue-webhook.js for why.
+const revenueStripeVerifier = makeStripeWebhookVerifier({ secret: String(ENV('STRIPE_WEBHOOK_SECRET') || '').trim(), now: () => Date.now() });
 /* ---- managed credits (config-gated). Shares the SAME spend ledger as the run finalizer, so a managed run's
    final truth lands in one place. INERT (configured() === false) unless CREDITS_URL is set — then admission can
    reserve/refund against a managed account and the STORE surface + /api/credits come alive. */
@@ -9035,6 +9056,9 @@ const ROUTES = [
   { m: 'GET', prefix: '/api/transcript', h: serveTranscript },
   { m: 'POST', exact: '/api/channels/handoff', h: handleChannelHandoff },
   { m: 'POST', prefix: '/api/channels/webhook/', h: handleChannelWebhook },
+  { m: 'POST', exact: '/api/revenue/webhook/stripe', h: handleRevenueWebhookStripe },   // TOKEN_EXEMPT (apiauth.js) — Stripe's own HMAC is the fence
+  { m: 'POST', exact: '/api/revenue/events', h: handleRevenueEventIngest },
+  { m: 'GET', qsplit: '/api/revenue/summary', h: handleRevenueSummary },
   { m: 'GET', prefix: '/api/memory/proposals', h: serveProposals },
   { m: 'GET', prefix: '/api/memory/pending', h: servePending },   // un-answered high-stakes decks (durable, cross-run)
   { m: 'POST', exact: '/api/memory/turnin', h: handleMemoryTurnin },
@@ -14691,6 +14715,7 @@ async function runOnce(o) {
   }).register(registry);   // H4: skill.write/list/view/manage — the agent's reusable procedure library (memory capability)
   Todo.makeTodoTool({ store: notebookStore }).register(registry);   // in-session task plan — shares the notebook's per-agent kv store ('todo:'+agentId)
   DeliverableTool.makeDeliverableTool({ notes: deliverableNotes }).register(registry);   // deliverable_note — the agent's OWN name for what it made; drained by runOnce at run end
+  RevenueTool.makeRevenueTool({ ledger: revenueLedger }).register(registry);   // revenue_status — real revenue_events, coded keep/kill verdict (rides the orchestrator object, see registry.js)
   makeToolSearchTool({ registry }).register(registry);   // tool.search — finds a GRANTED but unadvertised tool (CAP_REGISTRY `deferred: true`) and reveals it for the rest of the run; rides the computer object so no surface is stranded
   makeCodeTools({}).register(registry);   // code.run — child Node/vm owns no authority; every nested read returns through this run's parent dispatcher
   makeQuestTools({ store: questStore, clock: { now: () => Date.now() }, activeGoal: () => commanderGoals.get() }).register(registry);   // QUEST V2 §B + journey binding: personalized mints inherit the current goal id/domain evidence
@@ -19410,6 +19435,86 @@ async function handleChannelWebhook(req, res) {
   if (!msg.chatId || (!msg.text && !(Array.isArray(msg.media) && msg.media.length))) return json(400, { error: 'message payload is incomplete' });
   await live.hub.onInbound(Object.assign({}, msg, { chatId: String(msg.chatId), userId: String(msg.userId || ''), chatType: msg.chatType === 'group' ? 'group' : 'dm' }));
   json(202, { ok: true, accepted: true, channel, nonce: verdict.nonce });
+}
+
+/* Maps a Stripe event payload to a revenue_events row. Returns null for an event this loop does not model
+   (unattributable — no agentId metadata — or an event type we don't map), which the caller answers 202 so
+   Stripe stops retrying it; null is a "nothing to record", never a failure. A business agent's own checkout
+   flow is responsible for stamping `metadata.agentId` (+ optional `metadata.hypothesis`) on the Checkout
+   Session / PaymentIntent it creates — this only reads back what was already attached. */
+function revenueEventFromStripe(event) {
+  event = event || {};
+  const obj = (event.data && event.data.object) || {};
+  const meta = (obj && obj.metadata) || {};
+  const agentId = String(meta.agentId || meta.agent_id || '').trim();
+  if (!agentId) return null;
+  const hypothesis = String(meta.hypothesis || '').trim();
+  const occurredAt = Number(event.created) ? Number(event.created) * 1000 : Date.now();
+  const id = 'stripe_' + String(event.id || '');
+  const common = { id, agentId, hypothesis, source: 'stripe', occurredAt, raw: { type: event.type, object: obj.id } };
+  if (event.type === 'checkout.session.completed' && Number.isFinite(Number(obj.amount_total))) {
+    return Object.assign({ revenueCents: Number(obj.amount_total), costCents: 0 }, common);
+  }
+  if (event.type === 'payment_intent.succeeded' && Number.isFinite(Number(obj.amount_received))) {
+    return Object.assign({ revenueCents: Number(obj.amount_received), costCents: 0 }, common);
+  }
+  // a refund counts AGAINST the agent (costCents), never as negative revenue — the ledger only ever adds.
+  if (event.type === 'charge.refunded' && Number.isFinite(Number(obj.amount_refunded))) {
+    return Object.assign({ revenueCents: 0, costCents: Number(obj.amount_refunded) }, common);
+  }
+  return null;
+}
+
+/* POST /api/revenue/webhook/stripe — the BLOCKING revenue connector docs/AUTONOMOUS_BUSINESS_LOOP_PLAN.md §2
+   names: "rien dans le code ne lit un revenu réel." Exempted from the per-launch API token in apiauth.js
+   (Stripe's servers cannot carry it) — Stripe's OWN signing secret (STARNET_STRIPE_WEBHOOK_SECRET) is the
+   entire fence, verified in revenue-webhook.js. Host+Origin pinning (rejectApi, applied before any route
+   handler runs) still requires the request to reach this loopback port with a loopback Host header, so a real
+   Stripe delivery needs a local forwarder in front of it — e.g. `stripe listen --forward-to
+   127.0.0.1:<port>/api/revenue/webhook/stripe`, or an operator's own reverse proxy that preserves that Host —
+   this app is loopback-pinned by design (see apiauth.js's threat model), not itself a public endpoint.
+   Fails CLOSED on a persistence error (503, so Stripe retries): an accepted sale that never reached disk is a
+   lost dollar, unlike the ordinary fail-open writes elsewhere in this file. */
+async function handleRevenueWebhookStripe(req, res) {
+  const json = (code, value) => respondJson(res, code, value);
+  let raw; try { raw = await readBody(req, 1 << 20, res); } catch (_) { return; }
+  const verdict = revenueStripeVerifier.verify({ header: req.headers['stripe-signature'], body: raw });
+  if (!verdict.ok) return json(verdict.code || 401, { error: verdict.error });
+  let event; try { event = JSON.parse(raw) || {}; } catch (_) { return json(400, { error: 'bad json' }); }
+  const row = revenueEventFromStripe(event);
+  if (!row) return json(202, { ok: true, recorded: false, reason: 'no agentId metadata or unhandled event type' });
+  try { revenueLedger.recordStrict(row); }
+  catch (e) { return json(503, { error: 'revenue event could not be recorded' }); }
+  json(200, { ok: true, recorded: true, id: row.id });
+}
+
+/* POST /api/revenue/events — manual/poller ingestion for sources with no webhook of their own (an Etsy/Shopify
+   polling job, a Gumroad export, or a known API cost the Commander wants counted against a hypothesis).
+   Token-guarded like every other /api/* route (apiauth.js's default) — unlike the Stripe path above, whatever
+   calls this already holds this station's per-launch token. */
+async function handleRevenueEventIngest(req, res) {
+  const json = (code, value) => respondJson(res, code, value);
+  const body = await readJsonBody(req, readBody, 1 << 16, res);
+  if (body == null) return json(400, { error: 'bad json' });
+  if (!isAgentId(String(body.agentId || ''))) return json(400, { error: 'agentId is required' });
+  let row;
+  try {
+    row = revenueLedger.recordStrict({
+      agentId: body.agentId, hypothesis: body.hypothesis, source: body.source,
+      revenueCents: body.revenueCents, costCents: body.costCents, occurredAt: body.occurredAt, raw: body.raw
+    });
+  } catch (e) { return json(503, { error: 'revenue event could not be recorded' }); }
+  json(200, { ok: true, id: row.id });
+}
+
+// GET /api/revenue/summary?agent=<id> — the human/dashboard read side. The orchestrator itself reads through
+// the revenue_status TOOL (tools/builtin/revenue.js), which is the surface a model can actually call.
+function handleRevenueSummary(req, res) {
+  const json = (code, value) => respondJson(res, code, value);
+  const u = new URL(req.url, 'http://127.0.0.1');
+  const agent = u.searchParams.get('agent');
+  if (agent) return json(200, revenueLedger.verdict(agent));
+  json(200, { agents: revenueLedger.aggregateAll() });
 }
 
 // GET /api/memory/proposals?agent=<id>&run=<id> — the pending Keep/Edit/Discard candidates reflection raised
