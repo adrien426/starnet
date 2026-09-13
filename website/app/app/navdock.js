@@ -14,7 +14,7 @@
   if (!groups.length) return;
 
   // the menuitem buttons inside a group's popover (role=menuitem; see index.html .bb-menu)
-  const itemsOf = g => Array.from(g.querySelectorAll('.bb-menu .bb'));
+  const itemsOf = g => Array.from(g.querySelectorAll('.bb-menu .bb')).filter(item => !item.hidden);
 
   /* The four triggers wrap onto different rows on phone-width stations, so a fixed
      left:0 popover cannot be made viewport-safe with one CSS alignment. Clamp the open
@@ -52,6 +52,7 @@
       if (g === except) return;
       const wasOpen = g.classList.contains('open');
       g.classList.remove('open');
+      const menu = g.querySelector('.bb-menu'); if (menu) menu.inert = true;
       const t = g.querySelector('.bb-grp');
       if (t) t.setAttribute('aria-expanded', 'false');
       // a11y: if focus was inside the popover we just closed, hand it back to the trigger
@@ -66,6 +67,7 @@
     const willOpen = !g.classList.contains('open');
     closeAll(g);
     g.classList.toggle('open', willOpen);
+    const menu = g.querySelector('.bb-menu'); if (menu) menu.inert = !willOpen;
     const t = g.querySelector('.bb-grp');
     if (t) t.setAttribute('aria-expanded', String(willOpen));
     if (willOpen) {
@@ -124,7 +126,7 @@
       if (!viaKeyboard) { try { trigger.blur(); } catch (_) {} }
     });
     // picking an item runs its own (existing) handler — just collapse the dock after.
-    itemsOf(g).forEach(item => {
+    Array.from(g.querySelectorAll('.bb-menu .bb')).forEach(item => {
       item.setAttribute('role', 'menuitem');   // a11y: items inside the role=menu popover
       item.addEventListener('click', () => closeAll(null));
     });

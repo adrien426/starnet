@@ -30,9 +30,32 @@ ok(/function wireBackup\(/.test(ui), 'P1-7: wireBackup is wired');
 ok(/\/api\/config\/export/.test(ui), 'P1-7: export hits /api/config/export');
 ok(/\/api\/config\/import/.test(ui), 'P1-7: import hits /api/config/import');
 ok(/secretsNeeded/.test(ui), 'P1-7: import surfaces re-enter-your-key states from secretsNeeded');
+ok(/n\.fields\.join\(', '\)/.test(ui), 'P1-7: import names the exact connector fields that still need re-entry');
+ok(/already applied:/.test(ui), 'P1-7: a failed multi-section import reports any sections already applied');
+ok(/const freshMsg = document\.querySelector\('#bk-msg'\)/.test(ui), 'P1-7: the import result remains visible after Settings repaints');
 ok(/your keys and tokens are never included|secrets excluded/i.test(ui), 'P1-7: the card discloses secrets are excluded');
 ok(/AutonomyStore\.exportState/.test(ui) && /AutonomyStore\.importState/.test(ui), 'P1-7: browser-owned autonomy slice round-trips');
 ok(/function exportState\(/.test(auto) && /function importState\(/.test(auto), 'P1-7: AutonomyStore exposes export/import');
+
+// Execute the production browser-slice collector: a successful import must restore
+// visual preferences as well as theme and sound, including the new sky choices.
+const collectStart = ui.indexOf('    const browserSections = () => {');
+const collectEnd = ui.indexOf('    if (exportBtn)', collectStart);
+ok(collectStart >= 0 && collectEnd > collectStart, 'P1-7: browser export collector is located');
+for (const backdrop of ['void', 'galaxy', 'belt', 'moon']) {
+  const settings = { theme: 'green', themeHue: 140, themeSat: 85, themeGlow: 75,
+    panelBright: 20, roomLighting: 'high', backdrop, textScale: 115, sessionRow: 'inbox',
+    flicker: false, crtGlass: 'off', staticLevel: 45, sound: false, keepComputerAwake: false, notifyPrefs: { sound: false } };
+  const collect = new Function('store', 'notifyDefaults', 'resolveRoomLighting',
+    ui.slice(collectStart, collectEnd) + '\nreturn browserSections;')(
+    { settings }, () => ({}), v => v);
+  const sections = collect();
+  const restored = Object.assign({ backdrop: 'city', textScale: 0, sessionRow: 'compact' }, sections.settings);
+  for (const key of ['backdrop', 'textScale', 'sessionRow', 'roomLighting', 'staticLevel', 'theme', 'sound']) {
+    ok(restored[key] === settings[key], 'P1-7: backup/import preserves ' + key + ' with ' + backdrop);
+  }
+  ok(!Object.hasOwn(sections.settings, 'notifyPrefs'), 'P1-7: notification settings retain their separate section');
+}
 
 // ---- P1-8 notification preferences ----
 ok(/function notifyDefaults\(/.test(ui), 'P1-8: notifyDefaults defines the per-category prefs');
@@ -49,7 +72,7 @@ ok(/'runComplete'\)/.test(chat), 'P1-8: a run-produced-a-deliverable notify is t
 ok(/'cronDigest'\)/.test(appjs), 'P1-8: the while-you-were-away digest is tagged cronDigest');
 
 // ---- P1-9 advanced runtime knobs ----
-ok(/ADVANCED\s*<span class="dim">/.test(ui), 'P1-9: SETTINGS has an ADVANCED card');
+ok(/Runtime limits\s*<span class="dim">/.test(ui), 'P1-9: SETTINGS has an ADVANCED card');
 ok(/function wireAdvanced\(/.test(ui), 'P1-9: wireAdvanced is wired');
 ok(/\/api\/runtime\/knobs/.test(ui), 'P1-9: the card reads/writes /api/runtime/knobs');
 ok(/environment variable always overrides|env-locked|envLocked/i.test(ui), 'P1-9: precedence (env wins) is disclosed + env-locked fields are shown');

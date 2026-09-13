@@ -43,6 +43,24 @@ const AutoSessions = (() => {
   const streamOf = (runId) => STREAM_PREFIX + String(runId);
   // 'cron-' + a runId (crypto.randomUUID: hex + hyphens) fits the workstream/stream grammar (/^[A-Za-z0-9_-]{1,64}$/).
   function validStream(id) { return /^cron-[A-Za-z0-9_-]{1,58}$/.test(String(id || '')); }
+  function outcomeOfRun(run) {
+    if (!run) return null;
+    if (run.error || run.reason === 'error' || run.reason === 'failed') return 'failed';
+    return run.reason === 'done' ? 'ok' : null;
+  }
+  // A cron stream is named after ONE real run. Repair legacy stream-as-run ids, but never settle a
+  // later attended follow-up using the earlier scheduled run's outcome.
+  function recordOutcome(ws, outcome, endedAt) {
+    if (!ws || !validStream(ws.id) || !hasWS()) return;
+    const runId = ws.id.slice(STREAM_PREFIX.length);
+    const ids = Array.isArray(ws.runIds) ? ws.runIds : [];
+    if (ids.includes(ws.id)) ws.runIds = ids.map(id => id === ws.id ? runId : id).filter((id, i, all) => all.indexOf(id) === i);
+    const current = ws.runIds || ids;
+    if (current.length && current[current.length - 1] !== runId) return;
+    if (Workstreams.appendRun) Workstreams.appendRun(ws.id, runId, endedAt);
+    // noteRunEnd accepts a boolean, so unknown must never be passed through as false (or true).
+    if (Workstreams.noteRunEnd && (outcome === 'ok' || outcome === 'silent' || outcome === 'failed')) Workstreams.noteRunEnd(ws.id, runId, outcome !== 'failed');
+  }
   // Blank assistant envelopes can carry tool calls, but they are not visible output. Settled status markers count;
   // a pending-transcript marker deliberately does not, so a later open/backfill remains eligible to heal it.
   function hasReadableOutput(history) {
@@ -87,7 +105,7 @@ const AutoSessions = (() => {
       const map = Object.create(null);
       for (const j of jobs) {
         if (!j || !j.id) continue;
-        map[j.id] = { name: String(j.name || '').trim(), agentId: String(j.agentId || 'agent'), prompt: String(j.prompt || '') };
+        map[j.id] = { id: j.id, name: String(j.name || '').trim(), agentId: String(j.agentId || 'agent'), prompt: String(j.prompt || '') };
       }
       routines = map;
     } catch (_) { routines = routines || {}; }   // fail-open: names are cosmetic, a session still forms
@@ -105,7 +123,8 @@ const AutoSessions = (() => {
     const title = (job && job.name) || 'Routine';
     const agentId = (job && job.agentId) || 'agent';
     const seed = (job && job.prompt) ? [{ role: 'user', content: String(job.prompt) }] : [];
-    const ws = Workstreams.adopt({ id: id, title: title, agentId: agentId, lane: 'active', history: seed });
+    const ws = Workstreams.adopt({ id: id, title: title, agentId: agentId, lane: 'active', history: seed,
+      automation: { kind: 'routine', id: (job && job.id) || '', name: title } });
     if (!ws) return null;   // a session the Commander DELETED stays deleted (adopt refused the tombstoned id)
     // mark the row busy via the SAME per-workstream channel state chat.js drives (Channels.begin) so the
     // rail's railRowState paints the pulsing "running" dot — reused, not a bespoke busy flag.
@@ -175,7 +194,7 @@ const AutoSessions = (() => {
     ws.history = next;
     // hybrid-honest: a real run fired → todo advances to active. `endedAt` (heal/backfill paths) = the run
     // record's REAL end time, so the rail stamp is the run's, never this poll/boot moment.
-    if (hasWS() && Workstreams.appendRun) Workstreams.appendRun(ws.id, ws.id, endedAt);
+    recordOutcome(ws, outcome, endedAt);
   }
 
   // ---- busy reconciliation: heal a session wedged 'RUNNING' after a mid-run SSE drop -----------
@@ -198,7 +217,7 @@ const AutoSessions = (() => {
         if (r.ok) { const rows = ((await r.json()) || {}).runs || []; done = rows.find(x => x && x.runId === runId) || null; }
       } catch (_) { done = null; }   // offline / bridge still down → leave it busy, retry next tick
       if (done) {
-        const outcome = (done.reason === 'error' || done.error) ? 'failed' : 'ok';
+        const outcome = outcomeOfRun(done);
         await completeSession(runId, outcome, done.error || done.reason, done.ts);   // folds transcript + Channels.end; done.ts = the run's REAL end time
       }
     }
@@ -251,14 +270,20 @@ const AutoSessions = (() => {
         // /api/runs list once it's DONE, so backfilling it here is correct — and it also clears the wedged busy
         // state (foldTurns → completeSession-style, plus Channels.end below).
         const existing = Workstreams.get(sid);
-        if (existing && hasReadableOutput(existing.history)) continue;   // already has readable output/status → true dedupe
+        if (existing && run.cronJobId) Workstreams.adopt({ id: sid, automation: { kind: 'routine', id: run.cronJobId, name: run.cronJobName || run.title || 'Routine' } });
         const runId = String(sid).slice(STREAM_PREFIX.length);
+        const outcome = String(run.runId || '') === runId ? outcomeOfRun(run) : null;
+        if (existing && hasReadableOutput(existing.history)) {
+          // Transcript dedupe is not metadata dedupe: upgrade saved cron streams with real provenance/outcome.
+          if (String(run.runId || '') === runId) recordOutcome(existing, outcome, run.ts);
+          if (hasCh()) Channels.end(sid);
+          continue;
+        }
         // adopt (idempotent) — an existing seed-only session is preserved by adopt; a while-away run is already DONE.
-        Workstreams.adopt({ id: sid, title: String(run.title || 'Routine').split('\n')[0].slice(0, 80) || 'Routine', agentId: String(run.agentId || 'agent'), lane: 'active', history: (existing && existing.history) || [] });
+        Workstreams.adopt({ id: sid, title: String(run.title || 'Routine').split('\n')[0].slice(0, 80) || 'Routine', agentId: String(run.agentId || 'agent'), lane: 'active', history: (existing && existing.history) || [], automation: { kind: 'routine', id: run.cronJobId || '', name: run.cronJobName || run.title || 'Routine' } });
         const ws = Workstreams.get(sid);
         if (!ws) continue;
         const loaded = await fetchTranscript(ws.agentId, sid, options);
-        const outcome = (run.reason === 'error' || run.error) ? 'failed' : 'ok';
         foldTurns(ws, loaded.turns, outcome, run.error || run.reason, loaded.fetchOk, run.ts);   // run.ts = real end time, never boot time
         if (hasCh()) Channels.end(sid);   // a backfilled run is DONE → clear any wedged busy/running state
       }
@@ -279,7 +304,7 @@ const AutoSessions = (() => {
       // unknown routine → refresh the catalogue, then (re)seed the session's title once names arrive.
       loadRoutines().then(() => { const j = routineFor(p.jobId); const ws = Workstreams.get && Workstreams.get(streamOf(p.runId)); if (j && ws && (ws.title === 'Routine' || !ws.title)) { ws.title = j.name || 'Routine'; if (ws.agentId === 'agent' && j.agentId) ws.agentId = j.agentId; if (!ws.history.length && j.prompt) ws.history.push({ role: 'user', content: j.prompt }); refreshRail(); persist(); } });
     }
-    beginSession(p.runId, job);
+    beginSession(p.runId, Object.assign({ id: p.jobId || '' }, job || {}));
   }
   function onResult(p) {
     if (!p || !p.runId) return;
@@ -299,7 +324,7 @@ const AutoSessions = (() => {
   }
   function reset() { routines = null; stopReconcilePoll(); }   // a fresh Commander re-reads the catalogue; sessions are cleared by Workstreams.reset()
 
-  return { init, reset, _internals: { beginSession, completeSession, foldTurns, backfill, fetchTranscript, hasReadableOutput, loadRoutines, routineFor, validStream, streamOf } };
+  return { init, reset, _internals: { beginSession, completeSession, foldTurns, recordOutcome, outcomeOfRun, backfill, fetchTranscript, hasReadableOutput, loadRoutines, routineFor, validStream, streamOf } };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { AutoSessions };

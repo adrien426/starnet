@@ -1,4 +1,331 @@
+## MERGED — speech recovery (7ccb4ebd9, 2026-09-10)
+
+Owner-requested integration of agent/live-speech-0910 is complete. Pre-merge and
+post-merge fast gates passed 766/766; live speech recovered after context closure.
+Installer and customer recovery remain unverified. Receipt: qa/live-speech-device-0910.md.
+
+## VERIFIED IN BRANCH — 2026-09-10 post-release reliability cleanup (`agent/cleanup-0112-0910`)
+
+Owner requested cleanup using `docs/AUDIT_0.11.1_FOR_0.11.2.md`. This lane owns the five
+reproduced audit repairs and review of outstanding release evidence. Done means late catalogs
+preserve the chosen provider/model, image costs reconcile without a second debit, cancellation
+prevents image publication, panel height survives reopen/reload, and BYOK media recovery names
+the supported credential route. Registered regressions, live disposable-station checks and
+fast/HTTP gates must pass. Installed/account/hardware proof remains separately tracked.
+The previous release's exceptions do not carry forward.
+
+Source repairs and maintained regressions are verified on `c2193f1fb`: fast 753/753 and
+HTTP 108/108 green. The branch is synchronized with `2aa8305c0` and ready for integration
+review; no merge or release was performed. Nine findings repaired, with exact live/test
+scopes and remaining installed/account/soak acceptance in `docs/AUDIT_0.11.1_FOR_0.11.2.md`.
+
 # NEXT.md — current priorities & task queue
+
+## IMPLEMENTED — skin-motion-0910: movement stutter
+
+Source repair 75a814c18 holds look-back facing and removes empty waypoint frames for hero, idle crew and workstation crew. Live hero/crew checks passed; behavior regression 15/15 and customer journeys 34/34 passed. Receipt: qa/movement-continuity-0910.md. Full integration gate is recorded in qa/STATUS.md.
+
+## MERGED — 2026-09-10 world seating integration (agent/doorway-occlusion-0910)
+
+Owner requested repair of the three live-proven world seating defects. Source 774a5eeed plus
+33cdb8137 prevents unreachable desk teleporting, honors desk-facing sprites and releases stale
+furniture seating. Candidate 707d28291 passed fast 753/753; customer journeys 34/34; all 12
+hallway routes, seven recovery/refit checks and 288 skin/facing poses passed live. Integration
+completed at f3e57f58e; post-merge fast gate also passed 753/753. Installed desktop remains unverified. Receipt: docs/WORLD_SEATING_REPAIR_2026-09-10.md.
+
+
+## MERGED — 2026-09-10 doorway movement (agent/doorway-occlusion-0910)
+
+Owner reported agents walking behind walls near openings. Source repair a22f780e3 validates
+actual foot paths, guards early turns and re-anchors off-grid starts; 140b3e7b2 adds the
+remaining-leg separation regression. Live seeded proof: all 12 hero/crew/workstation routes
+passed both hallway orientations and directions with zero wall crossings. Customer journeys
+34/34 green; full fast gate 752/752 green. Bug: 49192a68. Merged 9e5b6d88e; exact merged-commit fast gate in the isolated checkout also passed 752/752.
+Unrelated qa/STATUS.md work was preserved. Installed recovery remains unverified.
+
+
+## MERGED — 2026-09-09 tool projection integration (agent/tool-projection-0909)
+
+Owner authorized repair and merge. Source repair 3c95b184f preserves saved room equipment when
+an interactive client omits placement, preserves explicit empty placement, and corrects toolset
+agent/lead disclosure. Merged 793bf1c0f; fast 735/735 and HTTP 108/108 passed before and
+after merge; customer journeys 34/34 passed. Customer report 432df352 remains open for the uncorrelated Trusted Project
+symptom; installer and reporter recovery are unverified. Receipt: qa/digests/2026-09-09-tool-projection.md.
+
+## MERGED — 2026-09-09 voice continuity (`agent/voice-continuity-0909`)
+
+Owner authorized sentence buffering, ordered audio recovery, cutoff diagnostics, noise-onset investigation and merge. Plan: docs/VOICE_CONTINUITY_PLAN_2026-09-09.md. Customer record: e1051446. Merged ab1cd74be; fast 734/734 before and after merge; customer journeys 33/33. Real Kokoro synthesis and browser playback completed. Installer and acoustic recovery remain unverified.
+
+## DONE — 2026-09-08 legacy rating save repair (agent/rating-repair-0908)
+
+Own lane: preserve legacy station identity on resume and surface rating failure reasons.
+Before/after real UI and same-run HTTP proof recorded in bug 1fc69e6a; source fix a55a1ed07.
+Integrated candidate gates: fast 733/733 and HTTP 105/105 passed. Customer installer recovery remains unverified.
+
+
+
+## MERGED — 2026-09-06 per-agent voices and Mac microphone (`agent/voice-agents-mac-0906`)
+
+Owner requested distinct voices per agent and relayed a MacBook Pro M1 Max report where
+Speak/Hands-Free Mic work only in the browser mirror. Commits `d65f8f538` and `3d3c1ff12`
+add stable-ID voice assignments under Settings → Live Voice, per-speaker call identity locks,
+spoken direct replies for specialists, and the missing macOS hardened-runtime audio-input
+entitlement. Release CI checks the actual signed app entitlement and microphone purpose string.
+
+Live seeded UI on :9196 proved NOVA/Bella and VOICE TEST/George independently, retained both
+through sidecar restart + page reload, and restored station-default inheritance on clear.
+Real authenticated TTS returned distinct Kokoro WAVs for the same phrase. No browser warnings,
+errors, or native control paint. Fast: 725/725; HTTP: 101/101; customer journeys: 29/29, all exit 0.
+
+Merged as `ac051bd84`; post-merge fast 725/725 and HTTP 101/101 passed. Integration receipt: `qa/STATUS.md`. Signed Mac allow/deny/reset/restart and customer recovery remain unverified; report
+`8a553481` stays open. Receipt: `qa/digests/2026-09-06-agent-voices-mac.md`.
+
+## DONE — 2026-09-06 Add agents integration (`agent/comms-add-agents-0906`)
+
+Owner requested merging the verified COMMS picker repair. It opens before network work,
+shows unavailable-backend errors with Retry, and ignores late results after Cancel.
+Merged as `ceafd9c67`; fast gate passed 725/725 before and after integration. Live port 9177
+now opens the picker and lists the crew. Existing QA status and Rooms handoff edits were
+preserved. Bug record: `0245a284`; receipt: `qa/digests/2026-09-06-add-agents.md`.
+
+## DONE — 2026-09-06 release UI audit integration (`agent/release-ui-audit-0906`)
+
+Owner authorized merging the two audited repairs: complete appearance backups and full-suite
+journey receipts. Synced with trunk `b8f8e8dd6`, then fast-forwarded the exact verified candidate
+`f4baf0d20` into integration. Fast gate passed 724/724 before and after merge; full live journeys
+passed 130/130 with `fullSuite:true` on that same SHA. Real backup export/import retained appearance
+through sidecar restart; merged extension editors and catalog sign-in filter passed live.
+Seven P1 release findings remain open. Unrelated QA status and Rooms handoff bytes were preserved.
+Audit and merge receipts: `docs/RELEASE_UI_AUDIT_2026-09-06.md`; digest in `qa/STATUS.md`.
+
+## IN PROGRESS — 2026-09-05 paid first-run recovery (`agent/paid-first-run`)
+
+Owner requested fresh assessment and execution of the subscription/credit purchaser recovery
+plan. Source repair `c364e991d` fences stale pairing, keychain recovery and account status
+responses; preserves a one-shot link confirmation across a transient disk failure; bounds
+identity recovery through body consumption; separates observed balance from optimistic
+admission holds; and adds sanitized paid-account/run correlation to copied diagnostics.
+
+Done means linking, interruption, explicit unlink, relink and restart retain the chosen
+account in the real app; a current funded balance is never replaced by an old account or
+local reservation; errors carry usable correlation; fast/HTTP gates pass. Full customer
+closure additionally requires the affected installed Windows/Apple Silicon behavior and
+production Sonnet trace. The three original reports remain open pending that evidence.
+Execution receipt: `qa/digests/2026-09-05-paid-first-run.md`.
+
+## DONE — 2026-09-05 life-goal progression (`agent/life-goal-progression`)
+
+Owner request: plan and execute a goal-centered leveling and quest loop.
+
+1. Separate completed planned actions from achieved life outcomes. Store success conditions;
+   require explicit Commander outcome evidence; retain existing earned history.
+2. Give Commander progression its own durable, deduplicated achievement points and headline
+   level; keep crew feedback XP separate. Credit intermediate goal-linked actions/metrics.
+3. Feed goal metrics, evidence, and blocker feedback into quest refresh. Add bounded reactive
+   refresh, durable later/blocked/too-big/resume, and explicit real-world action reporting.
+4. Connect the quest-log UI to those APIs, including user-performed milestone reporting,
+   extending a completed plan, and specific achievement receipts.
+5. Verify action -> evidence -> next step -> goal confirmation -> station evolution in the
+   seeded running app, repeat reads after restart, then fast/http gates and integration.
+
+Done means a completed plan leaves the goal active; a reported real-world action advances
+the plan with labelled evidence; a recorded metric informs planning; explicit goal outcome
+confirmation advances Commander level and station evolution exactly once, surviving restart.
+
+Implemented: explicit success conditions and goal confirmation, manual goal creation with one
+or more steps, focus switching, extending plans, user-performed action reports, Commander
+achievement progression, metric checkpoint dedupe, adaptive quest evidence, and defer/resume.
+Independent review corrected assigned-agent attribution for user actions, lost registration
+responses, and active-plan preservation when history is capped.
+
+Live seeded proof (`node dev/life-goal-proof.mjs`, :9143): three action reports left the goal
+active at 100% of plan and 30 points; metrics reached the model directive; a generated quest
+paused, resumed, and completed from a user report; explicit goal confirmation produced 160
+points, Commander Lv 2, and evolution stage 1. Restart preserved those values and repeat
+confirmation minted nothing. Browser warning/exception lists and native-control paint count
+were empty. The provider was a local deterministic mock, so real-provider recommendation
+quality and installed-desktop behavior remain unverified. Pre-merge gates passed: 722/722
+fast and 99/99 HTTP. The combined website-repair candidate also passed 722/722 fast and
+the live restart proof. Merged as `46b944c11`; post-merge gates passed 722/722 fast and
+99/99 HTTP, exit 0. Unrelated QA notes and the Rooms handoff were preserved.
+See `docs/LIFE_GOAL_PROGRESSION_2026-09-05.md`. No installed-app or release claim.
+
+## DONE — 2026-09-05 group chat integration (`agent/group-dm-plan-0904`)
+
+Merged as `6002f57f5` after synchronizing with conversation trunk `368d6a8b9`.
+Pre-merge and post-merge gates both passed 721/721 fast and 99/99 HTTP, exit 0.
+Conversational question drafts and normal-composer answers passed live restart/answer
+verification on :9137. Existing uncommitted QA status and Rooms handoff bytes were
+preserved. Integration window released; preview worktree retained for user testing.
+See `docs/GROUP_CHAT_MERGE_2026-09-05.md`. No installed-app or release claim.
+
+## DONE — 2026-09-05 conversational task context (`agent/rec-vision-audit-0905`)
+
+Owner approved concrete experience questions, whole-answer extraction, adaptive follow-ups,
+draft-led clarification, and stopping when the next useful action is clear, with a better COMMS UI.
+Extend the durable Task Brief and existing clarify/answer path. Keep choices optional, show cited
+working understanding separately from assumptions, preserve long answers and restart continuity,
+and honor a single use-your-judgment escape. Legacy choice callers remain compatible.
+Verified: live open question -> rich answer -> grounded adaptive follow-up/sample -> proceed; simple
+requests run immediately; restart restores the pending conversation without answering it itself.
+Combined branch passed 719/719 fast and 98/98 HTTP, with themed UI/keyboard/narrow-layout checks.
+Merged as `b62ccd22a`; post-merge fast 719/719 and HTTP 98/98 both passed, exit 0.
+See `qa/task-context-conversation-0905.md`. Existing QA status and Rooms handoff bytes were preserved.
+
+## DONE — 2026-09-05 platform connection integration (`agent/platform-handoff-0905`)
+
+Connector task continuation, saved browser-profile contention, and Google account identity were
+integrated with current station workflows and the Hermes reliability lane. Joint production trunk
+`c2a62eeb9` passed post-merge fast 716/716 and HTTP 96/96, both exit 0. Seeded live task
+restart/continuation and real-Chrome saved-cookie reuse passed on the identical production source.
+Unrelated QA status and Rooms handoff bytes were preserved; merge receipts belong in `qa/STATUS.md`.
+Production Google OAuth provisioning and installed-app release remain outside this local merge.
+Details and local evidence paths: `docs/PLATFORM_CONNECTION_FOLLOWTHROUGH.md`.
+
+## DONE — 2026-09-05 repeated-work takeover (`agent/rec-vision-audit-0905`)
+
+Plan: use durable task briefs joined to completed run evidence to detect the same bounded workflow
+on at least three separate occasions. Exclude retries/corrections, failed/internal runs, conflicting
+targets and existing routines. Offer one evidence-backed takeover through the existing routine beat;
+acceptance opens the existing editable routine draft with the original agent, sources and instructions.
+The user chooses the cadence and confirms creation; no schedule is inferred from counts. Persist
+offer/defer/never decisions, honor paused/forgotten personalization, and suppress scheduled workflows.
+
+Done means: in a seeded live station, repeated completed requests earn a concrete takeover card;
+review opens a prefilled routine draft, confirmation creates exactly one real scheduler job, and
+restart retains the job/decision without another offer. Negative scenarios remain silent. Focused,
+fast and HTTP gates pass before the user-authorized merge. Use existing scheduler execution and
+authority, with no new agent loop or capability unlock. Preserve unrelated trunk work.
+
+Implemented and source-app verified: takeover card -> evidence-backed editable draft -> confirmed
+Monday routine -> successful scheduler result -> restart without another offer. Branch gates:
+714/714 fast and 96/96 HTTP steps green. See `qa/workflow-takeover-0905.md` for fixture boundaries
+and run receipts. Post-merge gate result belongs in `qa/STATUS.md`.
+
+
+## DONE — 2026-09-05 approved world/UI integration (`agent/world-visual-audit-0904`)
+
+Owner approved the custom station and all six UI upgrades for immediate integration. Combined with
+trunk `010a6b50f`, verified, and fast-forwarded into trunk at `6085f26b8`: 712/712 fast steps green
+(extended timeout), 21 live UI checks, no browser exceptions. The integrated tree exactly matched
+the verified candidate. Capability badges preserve the newer per-agent effective-authority model;
+Refit keeps both the selected sprite preview and equipment explanations. The custom demo and review
+remain on ports 9177 and 9178. Unrelated, uncommitted QA status and Rooms handoff files were hash-checked
+and preserved. No installed binary, publication, or project-wide readiness claim.
+
+## 2026-09-05 — HERMES RECONNECT + WEBSITE LOOKUP (`agent/hermes-reconnect-capture-0905`)
+
+Implemented bounded SSE replay (1,024 events / 2 MiB), boot-scoped cursors, duplicate suppression,
+obsolete-connection guards, and authoritative snapshot recovery. `station.command` is never replayed:
+reconnecting cannot retry a renderer mutation that already executed or timed out. Recovery stays
+visibly degraded until a snapshot succeeds. The shipped website renderer mirror stays identical.
+
+`browser.network({deriveReadClient:true})` now derives up to eight runnable GET Fetch/XHR clients
+from successful observed requests. No cookies, headers or bodies are captured; signed/credential
+query parameters are excluded. Generated clients reject redirects, HTTP failures, non-JSON data,
+and oversized responses. The bundled **Learn a Website Lookup** procedure requires comparison
+against the live page before saving a runtime skill and its script through `skill.manage`.
+This first slice covers read-only JSON lookups, not authenticated or mutating workflow replay.
+
+Live proof: seeded station showed DOWN after its sidecar stopped and recovered after restart;
+the new boot's cursor requested snapshot reset. Real Chromium observed a fixture's lookup, the
+production browser tool derived its client, and direct JSON matched the rendered result. Focused
+tests prove disconnected channel replay, restart expiry, no duplicate replay, command exclusion,
+HTTP failure handling, and exact skill script read-back in a fresh process. Integrated by exact
+fast-forward at `9c9f788d0`; both before and after integration, fast **712/712** and HTTP **95/95**
+passed. Evidence: `qa/digests/2026-09-05-hermes-reconnect-capture.md`. No installed-binary or
+station-wide readiness claim.
+
+## 2026-09-04 — LIVE TRANSCRIPTS + VOICE TURN FLOW (`agent/voice-flow-0904`)
+
+Initial slices: `b4d83cf56` and `ff2946022`. Final integration and verification are recorded below.
+Standard recording can preview with installed local/native recognition even when its final transcriber
+uses a cloud credential. Local Live requests previews at a 650ms cadence, keeps words visible, reuses an
+exact completed preview instead of transcribing the same final audio again, extends a pending turn when
+speech resumes, and preserves successive finalized turns in order. Cancelled preview requests now reach
+the backend ASR queue. Pause/resume and Send Now are explicit; diagnostics expand only by deliberate click.
+Late local/native recognition cannot overwrite a newer call or a resumed listener.
+
+Evidence: voice button **100 assertions**, draft protection **21**, five new behavioral scenarios,
+Local Live UI, local voice, and media service **36 assertions** pass. In the running UI with synthetic
+microphone/recognition, HEARING displayed the actual supplied transcript before any task was sent;
+silence and Send Now submitted it; first-click pause/resume and end worked. A separate real bundled
+Whisper run transcribed a generated speech fixture in **3529ms cold / 586ms warm** on this host.
+These are synthetic-input and local-engine checks, not an attended microphone/speaker conversation or
+an installed-desktop proof. Windows hands-free fallback without local models remains utterance-based.
+Full gates passed: **test:fast 703/703**, **test:http 90/90**. Source verification was mechanically
+refreshed in `acd6eed27` without changing claim verdicts. The first HTTP attempt hit workspace-lease
+timing assertions (passed alone and in the full retry); earlier fast attempts caught the generated
+website mirror and source record needing refresh. Both were verified at that checkpoint; integration followed in the second round. No desktop build.
+
+Second round (2026-09-04): incremental local PCM sessions in both recording and hands-free modes;
+eight-second ASR windows with retained boundary context; stable/provisional text; adaptive pause option;
+prewarm while the microphone opens; interrupted reply tokens reject late chunks; subsequent speech
+clauses start without waiting for a 200-character sentence. Voice Details measures observed first words,
+last voiced frame to submission, and latest spoken chunk queued to actual playback (unobserved stages remain “—”).
+Fallback retains the original recording when streaming fails. Sessions expire and cap buffered audio.
+
+Live evidence: seeded server port8896, production voice UI and real bundled Whisper, with a generated
+speech PCM fixture injected only at the microphone seam and task submission captured without a provider
+call. Observed live transcript before submission, ordered open/audio/finish requests, the exact final
+“Please show my words while I am speaking. Then send a complete sentence.”, pause/resume, and end.
+Real browser receipt: ordered audio chunks, five recognitions, max window6784ms; first-partial2701ms on this
+heavily loaded shared host. Separate warm engine check first partial583ms. These are different checks,
+not a before/after speed claim. No attended mic/speaker or installed-build proof. Test page removed and
+server stopped. Focused voice button105, media36, draft protection21 assertions, adaptive timing, six flow
+scenarios, transport bounds/recovery, and UI checks pass. The subsequent real 16.66-second speech check crossed two window
+boundaries and retained all three repeated sentences exactly; max decode window8000ms, first partial605ms.
+It exposed timestamp drift that could duplicate an overlap word; the corrected path and its regression
+now preserve both real repetition and overlap deduplication.
+
+Final integration: `1c835fad3` on `feat/harness-backend`. Fast gate **709/709** on
+`0de259466` (`voice-fast-final.log`); HTTP **93/93** on `069fff836` (`voice-http-combined.log`).
+The final change after HTTP was frontend caption continuity only; the sidecar subtree remained exactly
+`4f1a4f6b5897efb975574ef655fc089ea275d52a`. The integration merge tree exactly matched the verified
+voice tree `b9a12d461cd8b2bb4a8ea6f56c57c7fc938b6436`; foreign QA/room handoff files were hash-checked
+and preserved. Final seeded UI + real Whisper proof showed first live words in **546ms**, continuous
+captions across a thinking pause, one complete submitted turn, and working pause/resume/end. Speech was
+a generated PCM fixture, submission was captured without invoking a provider, and output-model warmup
+was disabled for this last recognition-only check. No attended microphone/speaker or installed EXE proof.
+All temporary frontend proof files were removed; the test server was stopped.
+
+Earlier full fast gate caught direct clock reads in the new backend; injected clocks and a timing test
+fixed it. An earlier HTTP run was intentionally stopped to include the concurrent connector-security
+merge. Final gates above passed on the combined support, security, and voice code. Steady-caption UI
+polish triggered the final fast rerun; the backend and HTTP test surface were unchanged.
+
+
+## VERIFIED 2026-09-04 — SUPPORT EMAIL GAPS (`agent/email-gaps-0904`)
+
+Own INBOX routine create/readback, compatible-provider tool-history repair and the MCP session-drain
+race exposed by the post-merge gate. Existing sample,
+OpenRouter, provider-truth and linked-state branches are already merged; do not merge them again.
+Verified on integrated value-loop code: fast 707/707, HTTP 92/92, live creation/readback and restart.
+Three local gaps repaired; exact managed production error and customer spend still need evidence. Details and residual
+customer/production dependencies: [EMAIL_BUG_FOLLOWUP_2026-09-04.md](EMAIL_BUG_FOLLOWUP_2026-09-04.md).
+
+## VERIFIED 2026-09-04 — STARNET SAMPLE RUN + TIER CATALOG (`agent/model-catalogue-report`)
+
+The support report's successful Live Doctor inference and failed sample used different configuration
+sources. Samples now resolve the selected dock's roster provider/model/credential after routing, and
+resolve each downstream dock independently. Environment defaults remain only for an empty-roster
+headless host. Missing roster configuration refuses without spending another provider's credential.
+
+The tier picker now fetches the active provider's catalogue and rebuilds its options when that response
+arrives. Saved rows no longer shadow real entries with a false “not in catalog” label; unavailable
+catalogues preserve selections and explicitly report unverified membership.
+
+Evidence: live seeded UI changed all three tier selections, closed/reopened Models, and observed exactly
+one correctly labeled selected option per tier, with no browser warnings/errors. The real-sidecar
+regression ran a StarNet entry and custom-provider hop without an environment default or OpenRouter key,
+verified their separate credentials, repeated after restart, and refused a missing roster model with
+zero inference requests. Existing sample coverage passed 99 assertions. Full gates on `431578620`:
+`test:fast` **697/697 GREEN**, `test:http` **89/89 GREEN**. The first HTTP attempt hit a transient
+port conflict in nightshift-focus; that test passed alone and in the full successful retry.
+
+Implementation: `e33914cb2`; mechanical source lock: `431578620`. No integration merge, desktop build,
+or publication has been performed. Customers need a desktop release containing this branch.
+
 
 ## 2026-09-03 — POST-AUDIT: NEXT CUT MUSTS (owner-directed, audit items 1–5)
 

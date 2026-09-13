@@ -278,6 +278,7 @@ const Harness = (() => {
   //
   // Called again after a link/unlink so selecting STARNET does not wait for a page reload.
   async function refreshCreditsConfigured() {
+    selectionRevision++;
     try {
       const r = await fetch('/api/credits?history=0', { cache: 'no-store' });
       const j = (r && r.ok) ? await r.json() : null;
@@ -380,6 +381,7 @@ const Harness = (() => {
   // getKey() returns the real key in the browser; in desktop it returns '' (the key isn't here).
   const getKey = provider => DESKTOP ? '' : readScoped(LS.key, provider);
   const setKey = (k, provider) => {
+    selectionRevision++;
     const p = normalizeProviderId(provider || getProv());
     if (DESKTOP) {
       const on = !!(k && String(k).trim());
@@ -437,8 +439,12 @@ const Harness = (() => {
       .then(() => true)
       .catch(e => { console.warn('[harness] channel-token store failed:', (e && e.message) || e); return false; });
   }
+  // Explicit writes invalidate pending catalog reconciliation, including A -> B -> A.
+  let selectionRevision = 0;
+  const getSelectionRevision = () => selectionRevision;
   const getModel = () => localStorage.getItem(LS.model) || '';
   const setModel = m => {
+    selectionRevision++;
     const prev = localStorage.getItem(LS.model) || '';
     localStorage.setItem(LS.model, m || '');
     // A deliberate model switch invalidates every context-occupancy reading (a different window,
@@ -448,9 +454,10 @@ const Harness = (() => {
     if ((m || '') !== prev) { contextByKey = {}; runConv = {}; }
   };
   const getProv = () => normalizeProviderId(localStorage.getItem(LS.prov) || 'openrouter');
-  const setProv = p => localStorage.setItem(LS.prov, normalizeProviderId(p || 'openrouter'));
+  const setProv = p => { selectionRevision++; localStorage.setItem(LS.prov, normalizeProviderId(p || 'openrouter')); };
   const getBaseUrl = provider => readScoped(LS.baseUrl, provider);
   const setBaseUrl = (u, provider) => {
+    selectionRevision++;
     const p = normalizeProviderId(provider || getProv());
     writeScoped(LS.baseUrl, p, u || '');
     if (DESKTOP) {
@@ -677,7 +684,7 @@ const Harness = (() => {
      stream of newline-delimited JSON events — the FROZEN agent.* U.bus events the harness emits.
      Each event is re-emitted on U.bus (for telemetry) and mapped to the caller's callbacks.
      onToken(delta) per text delta · onToolCall/onToolResult per tool step · onUsage per turn. */
-  async function chat({ system, messages, onToken, onTerminalReset, onUsage, onToolCall, onToolResult, onRunId, onDeliverable, onPermission, onSummon, agentId, isTask, recurring, signal, streamId, recipeId, workbench, placed, stationPlaced, internal, evidence, projectRoot, taskAction, postconditions, recovery }) {
+  async function chat({ system, messages, onToken, onTerminalReset, onUsage, onToolCall, onToolResult, onRunId, onDeliverable, onPermission, onSummon, agentId, isTask, recurring, signal, streamId, recipeId, workbench, placed, stationPlaced, internal, evidence, projectRoot, taskAction, postconditions, recovery, connectorContinuationOf, retryUserRunId }) {
     const model = getModel(), provider = getProv(), key = getKey(provider), reasoningEffort = getReasoningEffort(provider);
     // Codex authenticates by an OAuth token (server-side); the desktop build keeps the key in the
     // sidecar's env (keychain). Neither needs a key sent from here.
@@ -695,6 +702,8 @@ const Harness = (() => {
       }
       if (getBaseUrl(provider)) reqBody.baseUrl = getBaseUrl(provider);
       if (streamId) reqBody.streamId = streamId;   // M-mem.2b: scope this run's memory to the active workstream
+      if (connectorContinuationOf) reqBody.connectorContinuationOf = connectorContinuationOf;
+      if (retryUserRunId) reqBody.retryUserRunId = String(retryUserRunId);
       // reason-only self-talk (retitle / goal-judge / pitch / autopilot): the sidecar keeps the caller's system
       // prompt VERBATIM (no manual/capability/skill/memory dressing) and never stamps the away clock for it.
       if (internal) reqBody.internal = true;
@@ -714,7 +723,8 @@ const Harness = (() => {
       // THE MOAT (FLOOR-REAL): send the agent's REAL placed capability objects so the sidecar grants exactly what's
       // on the floor (dish→web · cabinet→files · workbench→terminal · …). `placed` supersedes the legacy `workbench`
       // boolean; an old caller passing only `workbench` still grants the terminal.
-      if (Array.isArray(placed) && placed.length) reqBody.placed = placed;
+      // Empty is an authoritative live floor snapshot, distinct from an older client omitting it.
+      if (Array.isArray(placed)) reqBody.placed = placed;
       else if (workbench) reqBody.workbench = true;
       // Class Loadouts (shared-gear model): the STATION-WIDE gear the agent draws on under the overseer. Tools stay
       // gated by `placed` (the agent's own desk-room), but a class's SKILL PACKAGE — recipes, not tools — becomes
@@ -903,9 +913,12 @@ const Harness = (() => {
   // resumes the SAME paused turn — deliberately a separate route from consent, whose decisions are a closed
   // enum with grant semantics. Fire-and-forget; a stale id is a harmless no-op (the run fell back to the
   // durable end-run question).
-  async function consentAnswer(runId, promptId, answer) {
+  async function consentAnswer(runId, promptId, answer, receipt) {
     if (!runId || !promptId || !answer) return;
-    try { await fetch('/api/consent/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, promptId, answer }) }); } catch (_) {}
+    try {
+      const r=await fetch('/api/consent/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, promptId, answer, receipt:receipt===true }) });
+      if(receipt) return r.ok ? await r.json() : {ok:false};
+    } catch (_) { if(receipt) return {ok:false}; }
   }
 
   // answer a live crew.summon.request: report the new agentId we summoned (or null if we couldn't), which resolves
@@ -1225,7 +1238,7 @@ const Harness = (() => {
   return {
     pingEngine,
     isDesktop: () => DESKTOP,   // lets the UI tell a desktop keychain-store failure (token saved locally) from a browser no-op
-    getKey, setKey, setKeyPool, validateAndSetKeyPool, keyPoolSize, storeChannelToken, getModel, setModel, getProv, setProv, getBaseUrl, setBaseUrl, getReasoningEffort, setReasoningEffort, normalizeReasoningEffort, init, configured, refreshCreditsConfigured, hasStoredCredential, setDesktopConfigured,
+    getSelectionRevision, getKey, setKey, setKeyPool, validateAndSetKeyPool, keyPoolSize, storeChannelToken, getModel, setModel, getProv, setProv, getBaseUrl, setBaseUrl, getReasoningEffort, setReasoningEffort, normalizeReasoningEffort, init, configured, refreshCreditsConfigured, hasStoredCredential, setDesktopConfigured,
     listModels, probeProvider, validateAndSetKey, priceOf, contextLimitOf, contextState, chat, cancel, haltAll, consent, consentAck, consentAnswer, summonAck, notebook,
     runRecoveries, prepareAutomaticRecovery, resolveRunRecovery, prepareReviewedRecovery,
     memoryProposals, memoryTurnin, memoryVeto, memoryReset, memoryRecords, memoryDeclined, memoryRestore, memoryPending, memoryPin, memoryEdit, memoryForget,

@@ -579,17 +579,51 @@ function fakeDriver() {
     // A. a page that hydrates late: navigate must NOT return on the first look.
     {
       const rig = settleRig(i => i < 3 ? { ok: true, ready: 'loading', n: i } : { ok: true, ready: 'complete', n: 99 });
-      await rig.driver.navigate('http://127.0.0.1:5173/');
-      A.ok(rig.state.probes >= 4, 'navigate keeps polling a hydrating page instead of a blind fixed sleep (probes=' + rig.state.probes + ')');
-      await rig.driver.close();
+      // Exercise the real 400ms settle budget on a controlled clock: host scheduling
+      // must not decide whether this scripted page gets its fourth hydration probe.
+      const nativeTimeout = global.setTimeout, nativeClear = global.clearTimeout;
+      const timers = new Map(); let now = 0, nextId = 0;
+      global.setTimeout = (fn, ms, ...args) => {
+        const id = ++nextId; timers.set(id, { at: now + Number(ms || 0), run: () => fn(...args) }); return id;
+      };
+      global.clearTimeout = id => timers.delete(id);
+      try {
+        let finished = false, navigationError;
+        const navigation = rig.driver.navigate('http://127.0.0.1:5173/').then(
+          () => { finished = true; }, e => { finished = true; navigationError = e; });
+        for (let tick = 0; tick < 200 && !finished; tick++) {
+          now += 10;
+          for (let callbacks = 0; callbacks < 1000; callbacks++) {
+            const due = [...timers].filter(([, t]) => t.at <= now).sort((a, b) => a[1].at - b[1].at)[0];
+            if (!due) break;
+            timers.delete(due[0]); due[1].run();
+          }
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        if (!finished) throw new Error('navigation did not finish within the controlled timer budget');
+        await navigation;
+        if (navigationError) throw navigationError;
+        A.ok(rig.state.probes >= 4, 'navigate keeps polling a hydrating page instead of a blind fixed sleep (probes=' + rig.state.probes + ')');
+      } finally {
+        global.setTimeout = nativeTimeout; global.clearTimeout = nativeClear;
+        await rig.driver.close();
+      }
     }
 
     // B. a static page settles on the FIRST quiet read — auto-wait is faster than the old 900ms sleep.
     {
-      const t0 = Date.now();
       const rig = settleRig(() => ({ ok: true, ready: 'complete', n: 7 }));
-      await rig.driver.navigate('http://127.0.0.1:5173/');
-      A.ok(Date.now() - t0 < 800, 'an already-quiet page returns well inside the old 900ms blind wait');
+      // Observe the requested delay, not OS scheduling latency on a busy test host.
+      // This still catches a regression to the old unconditional 900ms sleep.
+      const scheduled = [];
+      const originalSetTimeout = global.setTimeout;
+      global.setTimeout = (fn, ms, ...args) => {
+        scheduled.push(ms);
+        return originalSetTimeout(fn, ms, ...args);
+      };
+      try { await rig.driver.navigate('http://127.0.0.1:5173/'); }
+      finally { global.setTimeout = originalSetTimeout; }
+      A.ok(!scheduled.includes(900), 'an already-quiet page does not schedule the old 900ms blind wait');
       A.ok(rig.state.probes <= 4, 'a settled page costs only the quiet-confirmation polls (' + rig.state.probes + ')');
       await rig.driver.close();
     }
@@ -1308,8 +1342,8 @@ function fakeDriver() {
       const seam2 = mkSeam();
       const held = mkLease(); held.ok = false;
       const B3 = makeBrowserTools({ makeDriver: seam2.makeDriver, forceHeadless: true, profileDir: '/ephemeral', persistentProfile: held.profile });
-      await B3.session.navigate('https://example.com');
-      A.eq(seam2.made[0].profileDir, '/ephemeral', 'a held lease falls back to the ephemeral per-run profile');
+        await rejects(B3.session.navigate('https://example.com'), /in use by another agent run/, 'a held lease cannot silently replace saved logins');
+        A.eq(seam2.made.length, 0, 'contention does not launch an unsigned browser');
     }
 
     // 11. browser.login carries a long tool timeout (it wraps two human-paced consent waits).

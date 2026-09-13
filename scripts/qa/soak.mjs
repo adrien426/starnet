@@ -183,6 +183,50 @@ export function boundSamples(samples, max) {
   return out;
 }
 
+// Compare complete history at one fixed watermark, not two moving newest-500 windows.
+// New routine runs can complete between the pre-stop read and the post-boot read.
+// Pagination errors must fail the restart measurement, never become an empty history.
+export async function readRunHistory(json, through) {
+  const ids = [], seen = new Set(), cursors = new Set();
+  let watermark = through, cursor = '';
+  do {
+    const query = new URLSearchParams({ agent: '*', limit: '500' });
+    if (watermark != null) query.set('through', String(watermark));
+    if (cursor) query.set('beforeRunId', cursor);
+    const response = await json('GET', '/api/runs?' + query);
+    const body = response && response.body;
+    if (response.status !== 200 || !body || !Array.isArray(body.runs) ||
+        !Number.isFinite(body.snapshotAt) || body.snapshotAt <= 0) throw new Error('run history snapshot unreadable');
+    if (watermark != null && body.snapshotAt !== watermark) throw new Error('run history watermark changed');
+    watermark = body.snapshotAt;
+    for (const row of body.runs) {
+      if (!row || typeof row.runId !== 'string' || !row.runId || seen.has(row.runId)) throw new Error('invalid or duplicate run history identity');
+      seen.add(row.runId); ids.push(row.runId);
+    }
+    cursor = body.nextCursor || '';
+    if (cursor && (!body.runs.length || cursors.has(cursor) || cursor !== body.runs[body.runs.length - 1].runId)) throw new Error('run history cursor did not advance');
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return { ids, through: watermark };
+}
+
+// The fixture's process-exit handler deletes its scratch roots. Copy both roots while
+// the sidecar is stopped, before disposal, so a failed receipt remains investigable.
+export function preserveSoakState(fixture, outDir) {
+  const root = path.join(path.resolve(outDir), 'forensics');
+  if (fs.existsSync(root)) throw new Error('refusing to overwrite soak forensics: ' + root);
+  fs.mkdirSync(root, { recursive: true });
+  const copies = {};
+  for (const name of ['workspace', 'profile']) {
+    const source = path.resolve(fixture[name]);
+    const destination = path.join(root, name);
+    if (destination === source || destination.startsWith(source + path.sep)) throw new Error('forensics destination overlaps fixture');
+    fs.cpSync(source, destination, { recursive: true, errorOnExist: true, force: false });
+    copies[name] = destination;
+  }
+  return copies;
+}
+
 function tail(xs, fraction) { return xs.slice(Math.floor(xs.length * (1 - fraction))); }
 function minutesFrom(t0, t) { return (t - t0) / 60_000; }
 
@@ -210,14 +254,16 @@ export function buildRoutinePlan(n) {
 }
 
 /** Parse the sidecar console for the validated cron telemetry lines (`[cron] <name> <json>`), in order. */
-export function parseCronLog(text) {
+export function parseCronLog(text, decisions = []) {
   const out = [];
+  const fireTimes = new Map(decisions.filter(d => d.source === 'cron' && d.kind === 'fire' && d.runId && Number.isFinite(d.ts)).map(d => [d.jobId + '|' + d.runId, d.ts]));
   const re = /^\[cron\] (cron\.[a-z_.]+) (\{.*\})\s*$/;
   for (const line of String(text || '').split(/\r?\n/)) {
     const m = re.exec(line);
     if (!m) continue;
     let payload; try { payload = JSON.parse(m[2]); } catch (e) { continue; }
-    out.push({ seq: out.length, name: m[1], payload });
+    const at = m[1] === 'cron.fire' ? fireTimes.get(payload.jobId + '|' + payload.runId) : undefined;
+    out.push({ seq: out.length, name: m[1], payload, ...(at === undefined ? {} : { at }) });
   }
   return out;
 }
@@ -276,7 +322,21 @@ export function accountRoutines(input) {
       const predictedNext = occ.length ? cronLib.nextFireAt(r.schedule, new Date(occ[occ.length - 1]).toISOString(), occ[occ.length - 1], { defaultTz: tz }) : null;
       if (predictedNext !== to) row.offSchedule.push(`${adv.from}→${adv.to} (schedule math predicts ${predictedNext == null ? 'null' : new Date(predictedNext).toISOString()})`);
       heads.push(from);
-      row.collapsed += Math.max(0, occ.length - 1);
+      let extraHeads = 0;
+      let head = from;
+      // Store polls can straddle two ticks: a delayed catch-up immediately before
+      // the next due instant, followed by that normal fire. Only durable fire times
+      // plus the real planner can prove an intermediate advance. A fire inside a
+      // genuinely collapsed backlog still fails; absent timing evidence stays strict.
+      for (const sf of occ.slice(1)) {
+        const prior = fires.find(f => Number(f.payload.scheduledFor) === head && Number.isFinite(f.at));
+        const current = fires.find(f => Number(f.payload.scheduledFor) === sf && Number.isFinite(f.at));
+        if (!prior || !current || prior.at >= sf || current.at < sf || current.at <= prior.at) continue;
+        const plan = cronLib.planTick([{ id: r.id, enabled: true, schedule: r.schedule, misfire: r.misfire, nextRunAt: new Date(head).toISOString() }], prior.at, { defaultTz: tz });
+        if (!plan.fire.some(f => f.jobId === r.id && f.scheduledFor === head) || !plan.next.some(n => n.jobId === r.id && n.nextAt === sf)) continue;
+        heads.push(sf); extraHeads++; head = sf;
+      }
+      row.collapsed += Math.max(0, occ.length - 1 - extraHeads);
     }
     row.owed = heads.length + row.collapsed;
     // 2. match fires to heads by scheduledFor; skips fill the rest in order
@@ -415,7 +475,7 @@ export function evaluate(input) {
         const missing = [...b].filter((id) => !a.has(id));
         if (missing.length) lost[k] = missing.slice(0, 20);
       }
-      return { at: r.at, epoch: r.epoch, bootMs: r.bootMs ?? null, stopMode: r.stopMode || null, counts: Object.fromEntries(Object.keys(r.before || {}).map((k) => [k, { before: (r.before[k] || []).length, after: ((r.after || {})[k] || []).length }])), lost, ok: Object.keys(lost).length === 0 && r.error == null, error: r.error || null };
+      return { at: r.at, epoch: r.epoch, bootMs: r.bootMs ?? null, stopMode: r.stopMode || null, runHistoryThrough: r.runHistoryThrough ?? null, counts: Object.fromEntries(Object.keys(r.before || {}).map((k) => [k, { before: (r.before[k] || []).length, after: ((r.after || {})[k] || []).length }])), lost, ok: Object.keys(lost).length === 0 && r.error == null, error: r.error || null };
     });
     rules.restart = { pass: cycles.length > 0 && cycles.every((c) => c.ok), actual: { cycles: cycles.length, failed: cycles.filter((c) => !c.ok).length, detail: cycles, reason: cycles.length ? undefined : 'no restart cycle completed' }, expected: { cycles: '>= 1', lost: 'none' }, why: RULES.restart.why };
   }
@@ -557,14 +617,15 @@ export async function runSoak(drivers, opts, hooks) {
   const trail = [];             // GET /api/cron store snapshots: { at, jobs: { id: { nextRunAt, enabled, lastError } } }
   let lastStoreReadAt = null;
 
-  const entities = async () => {
+  const entities = async (runThrough) => {
     const out = { agents: [], routines: [], runs: [], turns: [] };
     try { const d = await drivers.json('GET', '/api/diagnostics'); const n = d.body && d.body.report && d.body.report.agentCount; out.agents = Array.from({ length: Number(n) || 0 }, (_, i) => 'agent#' + i); } catch (e) { out.agents = null; }
     try { const c = await drivers.json('GET', '/api/cron'); out.routines = (c.body && c.body.jobs || []).map((j) => j.id); } catch (e) { out.routines = null; }
-    try { const r = await drivers.json('GET', '/api/runs?agent=*&limit=500'); out.runs = (r.body && r.body.runs || []).map((x) => x.runId); } catch (e) { out.runs = null; }
+    const history = await readRunHistory((m, r) => drivers.json(m, r), runThrough);
+    out.runs = history.ids;
     try { const t = await drivers.json('GET', `/api/transcript?agent=${SOAK_AGENT}&stream=${SOAK_STREAM}&limit=500`); out.turns = (t.body && t.body.turns || []).map((x, i) => i + '|' + (x.ts || '') + '|' + (x.role || '')); } catch (e) { out.turns = null; }
     for (const k of Object.keys(out)) if (out[k] === null) delete out[k];   // unreadable before → cannot judge; never a fake empty set
-    return out;
+    return { values: out, runThrough: history.through };
   };
 
   const seed = async () => {
@@ -665,7 +726,9 @@ export async function runSoak(drivers, opts, hooks) {
   const restartCycle = async () => {
     const rec = { at: now(), epoch: state.epoch, before: null, after: null, bootMs: null, stopMode: drivers.stopMode || null, error: null };
     try {
-      rec.before = await entities();
+      const before = await entities();
+      rec.before = before.values;
+      rec.runHistoryThrough = before.runThrough;
       await readStore(null);
       const pid = drivers.pid();
       await drivers.stop();
@@ -683,7 +746,7 @@ export async function runSoak(drivers, opts, hooks) {
       rec.bootMs = now() - t;
       state.epoch++;
       state.processSnapshots.push({ at: now(), event: 'restart', epoch: state.epoch, pid: booted.pid, bootMs: rec.bootMs });
-      rec.after = await entities();
+      rec.after = (await entities(rec.runHistoryThrough)).values;
     } catch (e) { rec.error = String(e && e.message); }
     state.restarts.push(rec);
     log(`[soak] restart #${state.restarts.length}: boot ${rec.bootMs}ms ${rec.error ? 'ERROR ' + rec.error : ''}`);
@@ -719,8 +782,10 @@ export async function runSoak(drivers, opts, hooks) {
   // the per-routine occurrence ledger — needs the cron event log (console `[cron]` lines) and the scheduler's own math
   if (typeof drivers.cronEvents === 'function' && drivers.cronLib) {
     try {
-      const events = parseCronLog(await drivers.cronEvents());
-      state.accounting = accountRoutines({ routines, events, trail, endAt: lastStoreReadAt, cronLib: drivers.cronLib, defaultTz: 'UTC' });
+      const decisions = typeof drivers.cronDecisions === 'function' ? await drivers.cronDecisions() : [];
+      const events = parseCronLog(await drivers.cronEvents(), decisions);
+      state.accountingInput = { routines, events, trail, endAt: lastStoreReadAt, defaultTz: 'UTC' };
+      state.accounting = accountRoutines({ ...state.accountingInput, cronLib: drivers.cronLib });
       state.accounting.events = events.length;
     } catch (e) { state.accounting = { reason: 'accounting failed: ' + (e && e.message) }; }
   } else state.accounting = { reason: 'cron event log not available to this run (no cronEvents/cronLib driver)' };
@@ -839,6 +904,10 @@ export function makeRealDrivers({ fixture, logFile, cronLib }) {
     cronLib: cronLib || null,
     // the complete sidecar console so far (flushed log + the live buffer) — the `[cron] <event> <json>` lines are the ledger's input
     async cronEvents() { flushLog(); try { return fs.readFileSync(logFile, 'utf8'); } catch (e) { return ''; } },
+    async cronDecisions() {
+      try { return fs.readFileSync(path.join(fixture.workspace, 'autonomy.ledger.jsonl'), 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)); }
+      catch (e) { return []; } // Missing timing evidence never approves an intermediate fire.
+    },
     // while the sidecar is DOWN: rewrite the given routines' schedule kind in the store (main + .bak, so the
     // resilient reader cannot recover the good copy) — the only way a can-never-fire schedule reaches the driver
     async corruptSchedules(ids) {
@@ -926,6 +995,18 @@ async function main() {
   mock.close();
   const meta = { sidecarHead: gitHead(repo), platform: `${process.platform} ${os.release()} ${os.arch()}`, node: process.version, host: os.hostname(), stopMode: drivers.stopMode, provider: 'mock (in-process OpenRouter double)', mockCalls: mock.calls.total, mockSlowCalls: mock.calls.slow, cronEvents: result.accounting && result.accounting.events || null, workspace: fixture.workspace, auxPasses: opts.aux ? 'default' : 'disabled (SKYNET_AUX_BUDGET=0)' };
   const receipt = buildReceipt(Object.assign({}, result, { meta }));
+  if (result.accountingInput) {
+    const accountingFile = path.join(outDir, 'accounting-input.json');
+    fs.writeFileSync(accountingFile, JSON.stringify(result.accountingInput, null, 2));
+    receipt.meta.accountingInput = accountingFile;
+  }
+  try { receipt.meta.forensics = preserveSoakState(fixture, outDir); }
+  catch (e) {
+    receipt.meta.forensicsError = String(e && e.message || e);
+    receipt.verdict = 'FAIL';
+    receipt.failedRules.push('forensics');
+    receipt.rules.forensics = { pass: false, actual: { error: receipt.meta.forensicsError }, expected: { preserved: true }, why: 'restart failures must retain the scratch state before fixture cleanup' };
+  }
   fs.writeFileSync(path.join(outDir, 'soak-receipt.json'), JSON.stringify(receipt, null, 2));
   fs.writeFileSync(path.join(outDir, 'SUMMARY.md'), renderSummary(receipt));
   await fixture.dispose();

@@ -178,10 +178,10 @@ const Tutorial = (() => {
   // workbench lives under WORKSTATIONS, the other three under CAPABILITY — resolveKit carries that, so the loop
   // guides the category switch instead of stranding the Commander.)
   const KIT_SPEC = [
-    { grant: 'FILES',    prop: 'war_intelcab',    label: 'INTEL CAB',   power: 'FILES',      got: 'now i can read and write files — that’s where i keep anything that matters.' },
-    { grant: 'WEB',      prop: 'comms_dish',      label: 'DISH',        power: 'the WEB',    got: 'and now the live web — real search, real pages, not just what i woke up knowing.' },
-    { grant: 'TERMINAL', prop: 'workbench',       label: 'WORKBENCH',   power: 'a TERMINAL', got: 'a real terminal — i can run commands and check what they did, and you approve each one.' },
-    { grant: 'MEMORY',   prop: 'gigs_servercart', label: 'SERVER CART', power: 'MEMORY',     got: 'memory that survives a restart — and my skill library, where i save and reload the procedures i work out, so i don’t wake up blank every time.' }
+    { grant: 'FILES',    prop: 'war_intelcab',    label: 'INTEL CAB',   power: 'FILES',      got: 'files equipment placed. it supports reading and writing files within your allowed folders.' },
+    { grant: 'WEB',      prop: 'comms_dish',      label: 'DISH',        power: 'the WEB',    got: 'web equipment placed. it supports search and browsing; service setup and access settings still apply.' },
+    { grant: 'TERMINAL', prop: 'workbench',       label: 'WORKBENCH',   power: 'a TERMINAL', got: 'terminal equipment placed. it supports commands and checks, subject to your access settings.' },
+    { grant: 'MEMORY',   prop: 'gigs_servercart', label: 'SERVER CART', power: 'MEMORY',     got: 'memory equipment placed. it supports saving and retrieving notes and procedures.' }
   ];
   let KIT = KIT_SPEC.slice();   // resolveKit() rebuilds this with live labels/categories at kit start
 
@@ -205,20 +205,35 @@ const Tutorial = (() => {
     // kills the old rhetorical "where do we begin?" self-answer the Commander found confusing.
     if (!hasDialogue()) { finishUp(true); return; }   // no panel → don't trap the Commander in a half-built tour
     Dialogue.open({ name: agentName });
+    if (Dialogue.setStage) Dialogue.setStage('FIRST TASK', 'Your station is ready');
     Dialogue.node({
-      lines: [seg('before you put me to work — want the quick tour? i’ll show you how this place actually runs, starting with why my room being bare matters.', 44, 0)],
+      lines: [seg('let’s take one real burden off your list. give me notes, messages, or an approved folder and i’ll make a useful draft you can review. you can also take the optional station tour.', 44, 0)],
       options: [
-        { label: '▸ SHOW ME AROUND (recommended)', value: 'tour' },
+        ...(typeof FirstValue !== 'undefined' ? [{ label: '▸ MAKE SOMETHING USEFUL (recommended)', value: 'value' }] : []),
+        { label: 'SHOW ME AROUND', value: 'tour' },
+        { label: 'CONNECT MY PLATFORMS', value: 'platforms' },
         { label: 'I’ll dive in myself', value: 'skip', skip: true }
       ]
-    }).then(res => { if (!active) return; if (res.skip) return finishUp(true); beatShowAround(); });
+    }).then(res => {
+      if (!active) return;
+      if (res.value === 'platforms') {
+        finishUp(true, true);
+        showPlatformConnections();
+        return;
+      }
+      if (res.value === 'value') {
+        // A concrete first task owns the handoff: do not overlay the connector pitch or a second coach.
+        finishUp(true, true);
+        if (FirstValue.open() === false && hasChat()) Chat.localLine('open RECIPES to choose a useful first task. the optional tool tour is still in the field manual.');
+        return;
+      }
+      if (res.skip) return finishUp(true);
+      beatShowAround();
+    });
   }
 
-  /* ---- THE ROLEPLAY COLD-OPEN: the agent walks to its own workstation and DISCOVERS it's boxed in ----
-     Truthful by construction: a fresh station really is compute-only (the moat), so "i reach for files and
-     there's nothing" is the literal state — which is exactly what motivates the kit-out. The panel clears so
-     the walk is visible, then reopens at the desk so the realization reads. A failsafe advances even if the
-     walk never lands (sidecar down / no seat), so the tour can never freeze here. */
+  /* Optional equipment tour. The walk illustrates the workstation, not a tool-access check.
+     Profiles and Full Access may already supply tools, so never narrate a fabricated failed attempt. */
   function beatShowAround() {
     if (!active) return;
     if (hasDialogue()) Dialogue.close();                 // clear COMMS so the walk + the agent are fully visible
@@ -237,12 +252,12 @@ const Tutorial = (() => {
     if (!active) return;
     if (hasDialogue()) Dialogue.open({ name: agentName });
     try { World.say('my desk.'); } catch (_) {}
-    await dsay('okay — i made it to my desk. i can think, and i can talk to you. that’s compute, and it’s always mine.', 44, 360);
+    await dsay('this is my workstation. start by telling me what you want done in COMMS. you don’t need to build a conveyor for a normal task.', 44, 360);
     if (!active) return;
-    try { if (World.truthPulse) World.truthPulse(); World.say('…nothing.'); } catch (_) {}
-    await dsay('but watch — i reach for the files… the live web… a terminal… a memory of my own…', 44, 360);
+    try { if (World.truthPulse) World.truthPulse(); World.say('tools for the task.'); } catch (_) {}
+    await dsay('props with ability badges provide tools, like files, web or a terminal. decoration changes how the station looks.', 44, 360);
     if (!active) return;
-    await dsay('nothing. none of it’s wired up yet. i’m a mind in a bare room.', 44, 280);
+    await dsay('you only need the abilities your work uses. ABILITIES shows my current access — your settings may already provide the tools without extra props.', 44, 280);
     if (!active) return;
     beatKitInvite();
   }
@@ -251,9 +266,9 @@ const Tutorial = (() => {
     if (!hasDialogue()) return beatKitIntro();
     Dialogue.open({ name: agentName });
     Dialogue.node({
-      lines: [seg('here’s the one rule of this whole place: what you build, i can do. every piece you place in my room hands me a real power. want me to walk you through kitting me out? a minute, tops.', 44, 0)],
+      lines: [seg('want to try placing equipment? this optional tour demonstrates four abilities. matching badges are alternatives — you don’t need every prop, and you can stop whenever you like.', 44, 0)],
       options: [
-        { label: '▸ Kit me out (recommended)', value: 'go' },
+        { label: '▸ TRY THE EQUIPMENT TOUR', value: 'go' },
         { label: 'I’ll explore on my own', value: 'skip', skip: true }
       ]
     }).then(res => { if (!active) return; if (res.skip) return finishUp(true); beatKitIntro(); });
@@ -315,19 +330,30 @@ const Tutorial = (() => {
     if (!k) return beatKitReady();
     const tool = (q('.refit-tool.active') || {}).dataset;
     if (!tool || tool.tool !== 'prop')
-      return kitFocus(q('.refit-tool[data-tool="prop"]'), 'tap ⚇ PROP (key 6) up top — that opens the gear menu.', 'step-prop');
+      return kitFocus(q('.refit-tool[data-tool="prop"]'), 'tap PROPS (key 6) in the build panel — that opens the gear menu.', 'step-prop');
+    const abilities = q('[data-prop-section="abilities"]');
+    const offerReq = kitNeeded && kitNeeded.size < KIT.length && typeof Build !== 'undefined' && !!Build.requisition;
+    if (abilities) {
+      if (!abilities.classList.contains('active')) return kitFocus(abilities, 'open ABILITIES — these props add real tools.', 'step-abilities');
+      const core = q('.refit-core-card[data-prop="' + k.prop + '"]');
+      if (!core) return kitFocus(q('[data-access-cap="' + WorldModel.capForProp(k.prop) + '"]'), 'choose ' + k.power + ' in the core tool access row.', 'step-core-ability');
+      return kitFocus(core, 'choose ' + k.power + ' (' + k.label + '), then click a clear tile in my room to place it.', 'step-tile-' + k.prop + (offerReq ? '-req' : ''),
+        offerReq ? { action: { label: '⚡ requisition the rest', onClick: runRequisition } } : undefined);
+    }
     // all capability + workstation gear is on the ⚙ SYSTEMS tier; if they wandered into ✦ DECOR, bring them back
     const tierActive = q('.refit-tier.active'), tierFn = q('.refit-tier-functional');
     if (tierFn && tierActive && tierActive !== tierFn)
       return kitFocus(tierFn, 'switch to ⚙ SYSTEMS — the gear that grants powers lives here, not in DECOR.', 'step-tier');
     const catA = (q('.refit-propcat.active') || {}).dataset;
+    const categoryMenu = q('.refit-category-menu');
+    if ((!catA || catA.cat !== k.cat) && categoryMenu && !categoryMenu.open)
+      return kitFocus(q('#refit-category-trigger'), 'open CATEGORY, then choose ' + k.catLabel + ' — that’s where ' + k.label + ' lives.', 'step-category-picker');
     if (!catA || catA.cat !== k.cat)
-      return kitFocus(q('.refit-propcat[data-cat="' + k.cat + '"]'), 'open the ' + k.catLabel + ' tab — that’s where ' + k.label + ' lives.', 'step-cat-' + k.cat);
+      return kitFocus(q('.refit-propcat[data-cat="' + k.cat + '"]'), 'choose ' + k.catLabel + ' — that’s where ' + k.label + ' lives.', 'step-cat-' + k.cat);
     // right tool, right tier, right tab — light the exact tile, named with its REAL catalog label.
     // COMPRESSION: the first placement teaches the loop; reps 2–4 teach nothing new. Once one needed cap is
     // down, every remaining tile step carries a one-tap "requisition the rest" — the agent places its own
     // remaining gear through the REAL path (Build.requisition), each landing scored by the normal hook.
-    const offerReq = kitNeeded && kitNeeded.size < KIT.length && typeof Build !== 'undefined' && !!Build.requisition;
     return kitFocus(q('.refit-proptile[data-prop="' + k.prop + '"]'),
       'pick ' + k.label + ' (' + k.power + '), then click a spot in my room to drop it in.' + (offerReq ? ' — or say the word and i’ll requisition the rest myself.' : ''),
       'step-tile-' + k.prop + (offerReq ? '-req' : ''),
@@ -358,9 +384,9 @@ const Tutorial = (() => {
   function kitOnPropPlaced(grant) {
     if (!active || !kitMode) return;
     tickBrief('build');
-    if (!grant) { kitFlash('that one’s just set dressing — it grants nothing. i need the gear that wears a power-word.'); return; }
+    if (!grant) { kitFlash('decoration placed. to try an ability in this tour, choose equipment with an ability badge.'); return; }
     if (!kitNeeded.has(grant)) {
-      kitFlash('already running ' + grant + ' — that’s a spare, no harm.');
+      kitFlash('another ' + grant + ' prop placed. matching badges are alternatives, so extra copies add no new tools.');
       if (!nextKit()) kitReadyTimer = setTimeout(() => { kitReadyTimer = null; if (active && kitMode) beatKitReady(); }, 1700);
       return;
     }
@@ -390,14 +416,14 @@ const Tutorial = (() => {
     kitMode = false;
     const placed = KIT.filter(k => kitNeeded && !kitNeeded.has(k.grant)).map(k => k.grant);
     const left = KIT.filter(k => kitNeeded && kitNeeded.has(k.grant)).map(k => k.grant);
-    const have = placed.length ? 'you’ve wired me ' + listWords(placed) + ' so far. ' : 'nothing placed yet — an empty room is an empty agent. ';
-    const dark = left.length ? 'still dark: ' + listWords(left) + '.' : '';
+    const have = placed.length ? 'you’ve placed equipment for ' + listWords(placed) + '. ' : 'no equipment placed in this tour yet. you can still talk to me in COMMS. ';
+    const dark = left.length ? 'remaining tour examples: ' + listWords(left) + '.' : '';
     if (!hasDialogue()) return placed.length ? beatEquippedPartial() : finishUp(true);
     Dialogue.open({ name: agentName });
     Dialogue.node({
-      lines: [seg(have + dark + ' want to finish kitting me out?', 44, 0)],
+      lines: [seg(have + dark + ' continue the optional tour?', 44, 0)],
       options: [
-        { label: '▸ Keep kitting me out', value: 'go' },
+        { label: '▸ CONTINUE THE TOUR', value: 'go' },
         { label: placed.length ? 'That’s enough for now' : 'Skip for now', value: 'skip', skip: true }
       ]
     }).then(res => {
@@ -433,7 +459,7 @@ const Tutorial = (() => {
     if (!hasDialogue()) return beatCommand();
     Dialogue.open({ name: agentName });
     Dialogue.node({
-      lines: [seg('look at that — files, the web, a terminal, and a memory of my own. that’s a whole agent. the room isn’t bare anymore, and neither am i.', 44, 460)],
+      lines: [seg('you’ve tried equipment for files, web, terminal and memory. that’s the placement loop. ABILITIES shows which tools i can use with my current settings. choose what your real tasks need.', 44, 460)],
       options: [
         { label: '▸ Watch me use it on a real job', value: 'demo' },
         { label: 'I’ve got it from here', value: 'done', skip: true }
@@ -443,7 +469,7 @@ const Tutorial = (() => {
   // they stopped with SOME gear placed — a real, partial agent. Acknowledge honestly and bow out (no nag).
   function beatEquippedPartial() {
     if (!active) return;
-    dsay('fair. i’ll work with what you’ve given me — wire the rest in REFIT whenever you like. you’re in control.', 44, 320).then(() => finishUp(false));
+    dsay('you can add equipment in REFIT whenever a task needs it. for now, tell me what you want done in COMMS.', 44, 320).then(() => finishUp(false));
   }
 
   // THE OPTIONAL DEMO — the real fs.write + fs.read loop, now that the agent is genuinely equipped. The panel
@@ -677,7 +703,7 @@ const Tutorial = (() => {
     if (kitReadyTimer) { clearTimeout(kitReadyTimer); kitReadyTimer = null; }
   }
 
-  function finishUp(skipped) {
+  function finishUp(skipped, valueHandoff) {
     if (finished) return; finished = true;        // idempotent: a late START-COMMANDING click after a skip can't re-run this
     active = false; kitMode = false; clearStall(); clearSpot(); clearCoach();
     clearKitTimers();   // drop the kit-out poll + flash + ready timers if they bailed mid-placement
@@ -688,6 +714,7 @@ const Tutorial = (() => {
     state.firstCommandDone = true;
     if (skipped && !replayMode) state.briefDismissed = true;     // replay never rewrites the saved first-steps preference
     save();
+    if (valueHandoff) { replayMode = false; return; }
     if (replayMode) {
       replayMode = false;
       if (hasChat()) Chat.localLine(skipped ? 'quick tour closed — your progress is unchanged.' : 'quick tour complete — your progress is unchanged.');
@@ -726,10 +753,11 @@ const Tutorial = (() => {
     state.connectOffered = true; save();                  // one-shot, like every other tour beat
     const ids = connectOffers(goalTexts());
     const items = ids.map(id => ({ label: '⧉ ' + (CONNECT_LABEL[id] || id), value: id }))
-      .concat([{ label: 'not now', value: 'skip', skip: true, quiet: true }]);
-    say([seg('one more thing. i can reach further than this room — wire a door and i work inside your real tools. the lamp only goes green when the host proves the link.', 44, 0)], () => {
+      .concat([{ label: 'Show me how to connect platforms', value: 'guide' }, { label: 'not now', value: 'skip', skip: true, quiet: true }]);
+    say([seg('want to connect an app you already use? choose one below, or open the connection guide. you can find apps in BUILD › ABILITIES › CATALOG, and messaging platforms in BUILD › CHANNELS.', 44, 0)], () => {
       const row = Chat.choices(items, item => {
         if (!item || item.skip) return done();
+        if (item.value === 'guide') { showPlatformConnections(); return; }
         // the CLICK proves nothing — the FIRST STEPS connector step ticks only from the read-back (watchConnectors).
         try { if (typeof StationUI !== 'undefined' && StationUI.connectorJump) StationUI.connectorJump(item.value); } catch (_) {}
         watchConnectors();
@@ -741,19 +769,19 @@ const Tutorial = (() => {
       }
     });
   }
-  // READ-BACK: the `connector` step is marked done only when /api/connectors lists a connector the host
+  // READ-BACK: the `platform` step is marked done only when /api/connectors lists a connector the host
   // proved `up` — never from a click or a sign-in popup opening. Bounded poll (a sign-in takes a minute, not
   // an hour), re-armed on every game entry so a connection made later still lands.
   let connPollTimer = null, connPollLeft = 0;
   function watchConnectors(polls) {
-    if (briefDone('connector') || typeof Harness === 'undefined' || !Harness.api || !Harness.api.get) return;
+    if (briefDone('platform') || typeof Harness === 'undefined' || !Harness.api || !Harness.api.get) return;
     connPollLeft = Number.isFinite(polls) ? polls : 60;   // ~5 min at 5s after a pick; ONE read on game entry
     if (connPollTimer) return;
     const tick = () => {
       connPollTimer = null;
-      if (briefDone('connector') || connPollLeft-- <= 0) return;
+      if (briefDone('platform') || connPollLeft-- <= 0) return;
       Promise.resolve(Harness.api.get('/api/connectors')).then(j => {
-        if (connectorUp(j && j.connectors)) { tickBrief('connector'); return; }
+        if (connectorUp(j && j.connectors)) { tickBrief('platform'); return; }
         connPollTimer = setTimeout(tick, 5000);
       }, () => { connPollTimer = setTimeout(tick, 5000); });
     };
@@ -866,15 +894,16 @@ const Tutorial = (() => {
   function onBuildOpen() {
     if (kitMode) return;   // during the guided kit-out, kitTick drives REFIT — don't stack the generic coachmark on top
     showCoach('build', '#refit-tools',
-      'this is REFIT — your floor is a flowchart: work arrives at the INBOX, every BAY is an agent doing one step, and the belts you draw are the order the work flows. keys 1–9 up top: 6 places gear, 7 lays belts, 9 stamps a whole starter line.');
+      'this is REFIT. PROP adds equipment or decoration. ROOMS organize your station. LINES connect agents into repeatable workflows. choose what your work needs — you can already ask for help in COMMS.');
   }
+  function onEquipmentInspect() { if (!kitMode) clearCoach(); }
   /* WORKFLOW COACHES (2026-07-05 belt-teach): each routing prop teaches ITS role in the two-trip story the
      first time it's placed — one line, at the moment of need, in the agent's voice. Each has its own
      seen-key so the whole chain gets taught exactly once, piece by piece, never as a wall of text. */
   const WF_COACH = {
     intake: 'that’s the INBOX — outside work (a DM, a routine) physically arrives here. belt it toward a BAY and you’ll watch the job ride in.',
     bay: 'a BAY is one agent’s personal dock — jobs land there, and every finished result ships out from it. it works with no belts at all; click it to pick whose dock it is.',
-    outbox: 'the OUTBOX is the loading dock — every job we actually FINISH ships a crate here onto the pallet. hit ▸ TEST to watch the whole loop once.',
+    outbox: 'the OUTBOX is the loading dock — every job we actually FINISH ships a crate here onto the pallet. hit ▸ PREVIEW to watch the whole loop once.',
     filter: 'a FILTER sorts UNOWNED work by what it is — code down one lane, research down another. work that already belongs to someone rides straight home past it. click it to set the lanes.',
     splitter: 'a SPLITTER spreads unowned work across its lanes — several agents working the same stream in parallel. it needs at least two out-going lanes.',
     // truthful telemetry (2026-07-26 mechanic removal): a merger is a LANE FUNNEL — it never batches or combines
@@ -889,9 +918,9 @@ const Tutorial = (() => {
     // HONEST (truthful-telemetry): a fresh solo station is COMPUTE-ONLY, so placing a cap-prop genuinely UNLOCKS
     // that power for the hero (heroCaps picks it up) — it did NOT "already come with it". Frame it as a real unlock.
     if (grant === 'COMPUTE') {                   // compute is the always-on freebie; a desk just gives the body a real seat to work at
-      msg = 'that’s a workstation — compute’s already mine (i can always think), so this just gives my body a real desk to walk to and work at. the powers that actually unlock are files, web, terminal, memory.';
+      msg = 'that’s a workstation — compute’s already mine (i can always think), so this just gives my body a real desk to walk to and work at. other equipment supports files, web, commands and memory. add what your work needs.';
     } else if (grant) {                          // cabinet/dish/workbench/server: a REAL unlock on the solo station
-      msg = 'that just switched ' + grant + ' on for me — i can use it now, for real. drop the same gear in a CREW agent’s room later and it’s their key too. place a power, gain a power — that’s the whole game.';
+      msg = 'that placed ' + grant + ' equipment. one matching prop covers that ability in its workspace; you don’t need every variant. select it to see who can use it and whether access is already available.';
     } else {                                     // inert decor
       msg = 'nice. the gear that grants a power wears its name — a workbench gives me a TERMINAL, a dish reaches the WEB, a cabinet opens FILES. the rest is yours to decorate.';
     }
@@ -900,17 +929,18 @@ const Tutorial = (() => {
   function onBeltPlaced() {
     tickBrief('belt');
     showCoach('belt', '#refit-test',
-      'belts show real work moving between us. want to see it without waiting for a message? hit ▸ TEST — i’ll send dummy crates down the line so you can watch them sort.');
+      'belts show real work moving between us. want to see it without waiting for a message? hit ▸ PREVIEW — i’ll send dummy crates down the line so you can watch them sort.');
   }
   function onConnectorPlaced() {
-    tickBrief('build'); tickBrief('connector');
+    tickBrief('build');
+    watchConnectors(1);
     showCoach('connector', '#refit-palette',
-      'that’s a portal — it wires me to a live tool server. the panel here lists them; bind one and its powers show up in my hands. the lamp says it’s alive: green good, red broken.');
+      'that’s a connector portal. connect the service in BUILD › ABILITIES › CATALOG first; placing a portal does not sign you in. the connection guide is in SYSTEM › FIELD MANUAL › CONNECT PLATFORMS.');
   }
   function onLevelUp() {
     tickBrief('level');
     showCoach('levelup', '#tb-station',
-      'i leveled — that’s real work shipped, not flattery. open my dossier → GROWTH to see how reliable i’ve actually been. it stays honest: “—” until it’s earned enough runs to judge.',
+      'my crew level grew from your feedback. your COMMANDER level here tracks recorded progress toward your goals. open QUEST LOG for your journey, or my dossier → GROWTH for my track record.',
       { overTerms: true });   // a level transition fires exactly once — show it even over an open panel rather than drop it
   }
 
@@ -923,9 +953,10 @@ const Tutorial = (() => {
     { k: 'approve',   label: 'Approve a tool request' },
     { k: 'build',     label: 'Place a piece of gear in REFIT' },
     { k: 'belt',      label: 'Lay a conveyor belt' },
-    { k: 'connector', label: 'Bind a connector portal' },
+    // Keep old portal-placement progress stored, but never reinterpret it as a verified account connection.
+    { k: 'platform',  label: 'Connect a work app (BUILD › ABILITIES)' },
     { k: 'channel',   label: 'Connect a messaging channel (✉ CHANNELS)' },
-    { k: 'level',     label: 'Reach Level 2' }
+    { k: 'level',     label: 'Grow a crew member to Level 2' }
   ];
   const briefDone = k => !!state.brief[k];
   const briefCount = () => STEPS.reduce((n, s) => n + (briefDone(s.k) ? 1 : 0), 0);
@@ -957,7 +988,9 @@ const Tutorial = (() => {
       const li = document.createElement('li');
       li.className = 'tut-brief-item' + (briefDone(s.k) ? ' done' : '');
       const box = document.createElement('span'); box.className = 'tut-brief-box'; box.textContent = briefDone(s.k) ? '✓' : '▫';
-      const lbl = document.createElement('span'); lbl.textContent = s.label;
+      const setup = s.k === 'platform' || s.k === 'channel';
+      const lbl = document.createElement(setup ? 'button' : 'span'); lbl.textContent = s.label;
+      if (setup) { lbl.type = 'button'; lbl.className = 'tut-brief-link'; lbl.onclick = () => openPlatformSetup(s.k === 'platform' ? 'apps' : 'messaging'); }
       li.appendChild(box); li.appendChild(lbl); list.appendChild(li);
     }
   }
@@ -1015,66 +1048,177 @@ const Tutorial = (() => {
     }
   }
 
-  /* ================= P3 — FIELD MANUAL (the reopenable codex) =================
-     Opened from the bottom-bar § FIELD MANUAL term, SYSTEM dock (stationui BUILDERS delegates here). Every entry is tagged
-     REAL or FOR SHOW, sourced from the live CAP_PROP_MAP + conveyor contract — the honesty mandate, on a page. */
+  /* ================= P3 — FIELD MANUAL (the reopenable handbook) =================
+     SYSTEM dock → stationui window → this chapter renderer. Equipment labels come from
+     WorldModel; examples are instructions to try, never badges claiming completed work. */
 
   function fmEntry(tag, title, body) {
-    const t = tag ? '<span class="fm-tag ' + (tag === 'REAL' ? 'real">REAL' : 'show">FOR SHOW') + '</span>' : '';
-    return '<div class="fm-entry">' + t + '<div class="fm-entry-h">' + title + '</div><div class="fm-entry-b">' + body + '</div></div>';
+    const t = tag ? '<span class="fm-tag">' + tag + '</span>' : '';
+    return '<section class="fm-entry">' + t + '<h3 class="fm-entry-h">' + title + '</h3><div class="fm-entry-b">' + body + '</div></section>';
   }
-  const FM_TABS = ['FIRST STEPS', 'THE LOOP', 'GEAR', 'WIRING', 'GROWTH'];
+  function fmAction(target, label) {
+    return '<button type="button" class="fm-action" data-fm-open="' + target + '">' + label + ' ↗</button>';
+  }
+  function fmMission(title, text) {
+    return '<aside class="fm-mission"><span class="fm-eyebrow">TRY THIS</span><h3>' + title + '</h3><p>' + text + '</p></aside>';
+  }
+  let manualStartChapter = 'FIRST MISSION';
+  let guidedPlatform = null;
+  function showPlatformConnections() {
+    if (typeof StationUI === 'undefined') return false;
+    hideBrief();
+    manualStartChapter = 'CONNECT PLATFORMS';
+    StationUI.openTerm('manual', 'platforms');
+    return true;
+  }
+  function openPlatformSetup(kind) {
+    if (typeof StationUI === 'undefined' || !['apps', 'messaging'].includes(kind)) return false;
+    hideBrief();
+    guidedPlatform = kind;
+    StationUI.closeTerm('manual');
+    StationUI.openTerm(kind === 'apps' ? 'connectors' : 'messaging', kind === 'apps' ? 'catalog' : 'overview');
+    if (kind === 'apps') watchConnectors();
+    return true;
+  }
+  // Inline help sits in the setup pane, so it never covers the controls or starts authorization itself.
+  function platformGuideHTML(kind) {
+    const apps = kind === 'apps';
+    return '<details class="platform-guide" data-platform-guide="' + kind + '"' + (guidedPlatform === kind ? ' open' : '') + '>'
+      + '<summary>' + (apps ? 'Connect a work app — step by step' : 'Chat from another platform — step by step') + '</summary>'
+      + '<p class="fm-note">Find this again: <b>BUILD › ' + (apps ? 'ABILITIES › CATALOG' : 'CHANNELS') + '</b>.</p>'
+      + '<ol><li>' + (apps ? 'Use Search abilities above to find your app. Its card shows the setup it needs.' : 'Choose your platform in the list. Its setup guide explains where to get the details it needs.') + '</li>'
+      + '<li>' + (apps ? 'Use the card’s action. SIGN IN opens account authorization; API key asks for a key from that service. Follow any setup instructions and review the access requested.' : 'Follow that platform’s setup instructions, then use its CONNECT action. Complete pairing if the platform asks for it.') + '</li>'
+      + '<li>' + (apps ? 'Check the status beside the service. A saved key is not a tested connection. If setup fails, read the message there before retrying.' : 'Check the platform’s status, then send your agent a message there. Seeing the reply is your end-to-end check.') + '</li></ol>'
+      + (apps ? '<p class="fm-note">Once connected, return to COMMS and ask for a small read, such as listing your next calendar events. Check the actual reply. You do not need to place a portal to sign in.</p>' : '')
+      + '<button class="bb xs" type="button" data-platform-back>BACK TO CONNECTION GUIDE</button></details>';
+  }
+  function wirePlatformGuide(body) {
+    body.querySelectorAll('[data-platform-guide]').forEach(el => {
+      el.ontoggle = () => { if (!el.open && guidedPlatform === el.dataset.platformGuide) guidedPlatform = null; };
+    });
+    body.querySelectorAll('[data-platform-back]').forEach(button => {
+      button.onclick = () => showPlatformConnections();
+    });
+  }
+  const FM_TABS = ['FIRST MISSION', 'CONNECT PLATFORMS', 'CONTROLS', 'CREW', 'GEAR', 'LINES', 'PROGRESS', 'HELP'];
   function fmContent(tab) {
-    if (tab === 'FIRST STEPS') {
-      let h = '<p class="fm-lead">a soft checklist — not a gate. any order, or skip them. each ticks when you actually do it.</p><ul class="fm-steps">';
-      for (const s of STEPS) h += '<li class="' + (briefDone(s.k) ? 'done' : '') + '"><span>' + (briefDone(s.k) ? '✓' : '▫') + '</span> ' + s.label + '</li>';
-      return h + '</ul>';
+    if (tab === 'CONNECT PLATFORMS') {
+      return '<p class="fm-lead">Bring the apps you already use into your station. What would you like to connect?</p>'
+        + '<div class="fm-map">'
+        + fmEntry('WORK APPS', 'Let your agent work with your apps', 'Use your mail, calendar, documents and other services from COMMS. Browse the current catalog to see what is available.<br><b>BUILD › ABILITIES › CATALOG</b><div class="fm-actions"><button type="button" class="fm-action" data-platform-start="apps">SHOW ME WHERE TO CONNECT APPS ↗</button></div>')
+        + fmEntry('MESSAGING', 'Talk to your agent from another platform', 'Connect a messaging platform so you can chat with your agent there. Each platform has its own setup guide.<br><b>BUILD › CHANNELS</b><div class="fm-actions"><button type="button" class="fm-action" data-platform-start="messaging">SHOW ME WHERE TO CONNECT MESSAGING ↗</button></div>')
+        + '</div><p class="fm-note">For example, using Slack as a work tool and chatting with your agent from Slack are different connections. Choose the path for what you want to do.</p>'
+        + '<p class="fm-note">You can connect one now or return whenever you need it: <b>SYSTEM › FIELD MANUAL › CONNECT PLATFORMS</b>. Connecting accounts is optional.</p>'
+        + fmAction('comms', 'I’LL CONNECT LATER');
     }
-    if (tab === 'THE LOOP') {
-      return '<p class="fm-lead">one loop runs everything here, and it’s all real:</p>'
-        + fmEntry('REAL', '1 · ASK', 'type a job in COMMS. small talk i answer in place; a real task and i get up.')
-        + fmEntry('REAL', '2 · WALK', 'i cross to my workstation. that desk is where i actually go to work, on your machine.')
-        + fmEntry('REAL', '3 · CONSENT', 'local file reads and private notebook saves do not prompt. for other file changes or network actions, i ask unless that class is already approved or FULL ACCESS is on; protected actions stay blocked.')
-        + fmEntry('REAL', '4 · RUN', 'i execute the real tools you’ve granted me — web search, file read/write — and stream the result to COMMS.')
-        + fmEntry('REAL', '5 · PROVE', 'i verify the work and show the outcome instead of just claiming it.')
-        + '<p class="fm-note">every crew member you recruit is a real, separate agent with its own identity, workspace, memory, and sessions. right now one agent runs the loop; recruit more and each runs its own work.</p>';
+    if (tab === 'FIRST MISSION') {
+      return '<p class="fm-lead">You command the station. Your crew does real work on your computer. Start with one useful result.</p>'
+        + '<div class="fm-route" aria-label="The work cycle"><span>GIVE A JOB</span><i aria-hidden="true">→</i><span>FOLLOW THE RUN</span><i aria-hidden="true">→</i><span>CHECK THE RESULT</span></div>'
+        + fmEntry('01', 'Choose your objective', 'Open <b>COMMS</b>, the chat panel, and pick the agent on the line. Say what you want, give the material to work from, and describe the finished result.')
+        + fmMission('Turn rough notes into a plan', '<b>“Turn these notes into a checklist for tomorrow. Put the most important task first. Keep it under ten items: [paste your notes].”</b> Replace the bracketed text with your notes, then send. This first job needs no connector or production line.')
+        + fmEntry('02', 'Stay on the channel', 'Watch the reply and tool activity in COMMS. If the agent needs context, answer in the conversation. If an approval appears, read the proposed action and choose whether to allow it. Movement around the station accompanies activity; the run details tell you what actually happened.')
+        + fmEntry('03', 'Inspect the payoff', 'Read the checklist and ask for a revision if it misses the mark. For jobs that create files or apps, use <b>WORK › DELIVERABLES</b> and <b>OPEN</b> the result. A finished run is your cue to inspect the work.')
+        + '<div class="fm-actions">' + fmAction('comms', 'GO TO COMMS') + fmAction('deliverables', 'OPEN DELIVERABLES') + '</div>'
+        + '<p class="fm-note">Need an idea? <b>WORK › RECIPES</b> has ready-made jobs. Every chapter is available now; read in any order. The quick tour below is optional.</p>';
+    }
+    if (tab === 'CONTROLS') {
+      const keys = [['0', 'Select / inspect'], ['1', 'Room'], ['2', 'Hallway'], ['3', 'Surface'], ['4', 'Move'], ['5', 'Delete'], ['6', 'Props'], ['7', 'Belt'], ['8', 'Copy'], ['9', 'Layouts']];
+      return '<p class="fm-lead">Your control deck: chat to give orders, the bottom menus to manage the station, REFIT to build.</p>'
+        + fmEntry('CHAT', 'Send a command', '<kbd>Enter</kbd> sends. <kbd>Shift + Enter</kbd> adds a line. Type <kbd>/</kbd> to browse slash commands. Use the agent picker in COMMS to choose who receives your message.')
+        + '<div class="fm-map"><div><b>CREW</b><span>Agents, recruitment, your Commander dossier.</span></div><div><b>WORK</b><span>Tasks, deliverables, recipes, automation, quests.</span></div><div><b>BUILD</b><span>Refit the station, manage abilities, connect channels.</span></div><div><b>SYSTEM</b><span>This manual, settings, updates, notifications.</span></div></div>'
+        + '<h3 class="fm-subhead">BUILD › REFIT STATION</h3><p class="fm-note">These keys work while REFIT is open and you are not typing in a field.</p>'
+        + '<dl class="fm-keys">' + keys.map(([key, label]) => '<div><dt><kbd>' + key + '</kbd></dt><dd>' + label + '</dd></div>').join('') + '</dl>'
+        + fmEntry(null, 'Camera &amp; editing', '<kbd>Space + drag</kbd> pans; the scroll wheel zooms. <kbd>F</kbd> fits the station. <kbd>R</kbd> rotates supported props; <kbd>Shift + R</kbd> rotates back; <kbd>M</kbd> mirrors. <kbd>Ctrl / ⌘ + Z</kbd> undoes; add <kbd>Shift</kbd> to redo. <kbd>Esc</kbd> backs out of the current card, placement, or tool before leaving REFIT.')
+        + fmMission('Make room for an idea', 'Open REFIT, press <kbd>1</kbd> and drag out a room. Press <kbd>6</kbd>, choose a prop, then click the floor to place it. Use Undo to reverse an edit.')
+        + fmAction('refit', 'ENTER REFIT');
+    }
+    if (tab === 'CREW') {
+      return '<p class="fm-lead">Give each crew member a clear role. Pick the right agent for the job, then keep its conversation together.</p>'
+        + fmEntry('ROSTER', 'Recruit &amp; configure', '<b>CREW › RECRUIT</b> adds an agent. In <b>CREW › AGENTS</b>, inspect its identity, model, abilities, and configuration. The model belongs to the agent, so changing it affects that agent across its chats.')
+        + fmEntry('COMMS', 'Direct messages &amp; group work', 'Choose an agent in COMMS for a direct conversation. Use <b>Add agents</b> to bring crew into a group conversation. Use <b>Sessions</b> to return to an earlier conversation and its run history.')
+        + fmEntry('WORK', 'Know where a job lives', '<b>TASKS</b> holds planned board work. Chats, routines, and while-away runs live as <b>Sessions in COMMS</b>; not every conversation becomes a board task. <b>DELIVERABLES</b> is where you find produced outputs.')
+        + fmEntry('VOICE', 'Talk to your crew', 'Use the microphone in COMMS to speak, or the hands-free control for a live conversation. <b>SYSTEM › SETTINGS › Live Voice</b> configures voice and microphone options, including different voices for individual agents.')
+        + '<p class="fm-note">every crew member you recruit is a real, separate agent with its own identity, workspace, memory, and sessions. Specialists own their desk; other equipment is shared through the station’s overseer.</p>'
+        + '<div class="fm-actions">' + fmAction('agents', 'INSPECT CREW') + fmAction('tasks', 'OPEN TASKS') + '</div>';
     }
     if (tab === 'GEAR') {
-      return '<p class="fm-lead">a prop grants a CAPABILITY — what i can attempt, not blanket consent. Settings &gt; Permissions decides whether an action asks or runs without another prompt; most other furniture is set dressing.</p>'
-        + fmEntry('REAL', 'WORKSTATION → a desk to work at', 'desk · console · bench · pixel rig. compute to think is always mine — a workstation just gives my body a real desk to walk to and sit at, and its screens light while i work.')
-        + fmEntry('REAL', 'CABINET → files', 'intel cab · safe · vault · rack · shelf. read &amp; write files in my workspace.')
-        + fmEntry('REAL', 'DISH → web', 'comms dish · uplink · beacon. reach the live web.')
-        + fmEntry('REAL', 'SERVER → memory + skills', 'server cart · relay stack · core. a notebook that survives restarts — and the skill library where i save &amp; reload reusable procedures.')
-        + fmEntry('REAL', 'CONNECTOR PORTAL → live tools', 'binds one MCP server; its tools land in my hands. lamp = health: green live, amber warming, red broken.')
-        + fmEntry('REAL', 'WORKBENCH → terminal', 'the powered bench. place it in my room and i can run real shell commands and verify what they did — under your Settings &gt; Permissions posture and the protected-action floor. it glows while i’m running code.')
-        + fmEntry('SHOW', 'everything else', 'plants, rugs, screens, lounge gear — flavour. they grant nothing; place them because the place is yours.');
+      const gear = [
+        ['desk', 'WORKSTATION', 'A desk, console, or pixel rig gives an agent a work position. A routed BAY needs a computer in its room.'],
+        ['war_intelcab', 'CABINET', 'File tools: read and write within the agent’s configured reach. Includes safes, vaults, racks, and shelves.'],
+        ['comms_dish', 'DISH', 'Web search and page access. Uplinks and beacons provide the same capability.'],
+        ['gigs_servercart', 'SERVER', 'Persistent notebook and reusable skill procedures. Relay stacks and cores also provide memory.'],
+        ['connector_portal', 'CONNECTOR PORTAL', 'Tools from a bound connector. Connect the service in ABILITIES and check its status; placing a portal alone does not sign you in.'],
+        ['workbench', 'WORKBENCH', 'Run terminal commands and verification tools under the agent’s configured permissions and reach.'],
+        ['studio', 'MEDIA STUDIO', 'Image generation and image analysis. Available providers and their configuration determine which operations can run.'],
+        ['jukebox', 'JUKEBOX', 'Spotify search and playback controls. Requires Spotify to be connected in ABILITIES.']
+      ];
+      return '<p class="fm-lead">Equipment gives the station abilities. Inspect a prop’s capability label before you place it.</p>'
+        + '<div class="fm-gear-grid">' + gear.map(([prop, title, text]) => fmEntry(typeof WorldModel !== 'undefined' ? WorldModel.grantLabelForProp(prop) : null, title, text)).join('') + '</div>'
+        + fmEntry('DECOR', 'Make the station yours', 'Plants, rugs, and other decoration shape the atmosphere. They do not grant tools. Workflow machines such as bays and splitters have their own job: see LINES.')
+        + fmEntry('ACCESS', 'Equipment &amp; permission are separate', 'A prop grants a CAPABILITY — what an agent can attempt, not blanket consent. Profiles, shared equipment, and Full Power can also supply abilities. Check the agent’s actual tool readout in <b>AGENTS</b> and the settings in <b>ABILITIES</b>. Settings &gt; Permissions decides whether an action asks or runs without another prompt.')
+        + fmEntry('ASK / FULL POWER', 'Choose how much control to hand over', 'In restricted modes, local file reads and private notebook saves do not prompt. Other actions may ask unless already approved or FULL ACCESS is on. ASK and narrower reach modes retain their restrictions. <b>FULL POWER is host-wide</b>: protected files, arbitrary commands, visible apps, and screen/input control are in scope. It does not supply missing credentials, disconnected services, or OS privileges.')
+        + fmAction('connectors', 'OPEN ABILITIES');
     }
-    if (tab === 'WIRING') {
-      return '<p class="fm-lead">the rule: outside work arrives at an INBOX, rides the belts, and runs as the agent whose BAY the line ends at — and every finished job ships a crate from the bay out to the OUTBOX. belts don’t belong to agents — bays do. heads up: real work runs server-side whether or not you’ve laid a belt; the belt only ever shows and routes it.</p>'
-        + fmEntry('REAL', 'BELT (key 7)', 'drag to lay a line. a COMPLETE inbox→bay or bay→outbox line glows and animates; a cold dark line means the chain is broken — the broken piece is flagged on the floor, and hovering any belt tile shows where it flows.')
-        + fmEntry('REAL', 'INBOX / OUTBOX', 'outside work arrives at the inbox — from a connected channel (✉ CHANNELS: telegram / discord) or an armed routine. nothing wired to feed it? the inbox says NO FEED. every finished job ships a crate out to the outbox.')
-        + fmEntry('REAL', 'BAY', 'click it to assign an agent — work reaching its bay runs as that agent, with that room’s gear. a bay also needs a PC in its room, or routed work arrives with no compute.')
-        + fmEntry('REAL', 'FILTER / MERGER / SPLITTER', 'route by tag, gather many into one, or fan out across agents — real branching of the pipeline. a splitter needs at least two out-going lanes.')
-        + fmEntry('REAL', 'AIRLOCK', 'seal a room and the agent can’t path out — an unmerged worktree, made physical.')
-        + fmEntry('REAL', '▸ TEST', 'no message handy? hit TEST in REFIT — dummy crates ride your belts so you can watch them sort.')
-        + fmEntry('SHOW', 'box bob · chevrons · cargo colours', 'pure juice — they make the flow legible, they don’t change what runs.');
+    if (tab === 'LINES') {
+      return '<p class="fm-lead">Turn repeatable work into a production line. You can still give ordinary jobs in COMMS without building belts.</p>'
+        + '<div class="fm-route"><span>INBOX<small>work arrives</small></span><i aria-hidden="true">→</i><span>BAY<small>agent + instructions</small></span><i aria-hidden="true">→</i><span>OUTBOX<small>output leaves</small></span></div>'
+        + fmEntry('01', 'Place the stations', 'In REFIT, open <b>PROPS › WORKFLOW</b> and place an INBOX, BAY, and OUTBOX. Click the BAY in SELECT mode to assign an agent and define its step. Its room needs a computer.')
+        + fmEntry('02', 'Connect the route', 'Press <kbd>7</kbd> for BELT. <b>Click one machine, then another</b> to lay a connection automatically; dragging lays tiles by hand. Connect INBOX → BAY, then BAY → OUTBOX. Inspect the route and fix any flagged breaks.')
+        + fmEntry('03', 'Give the line a source', '<b>BUILD › CHANNELS</b> connects incoming messages. <b>WORK › AUTOMATION</b> manages routines and loops. Configure the source and destination for the workflow; an inbox marked <b>NO FEED</b> has no source feeding it.')
+        + fmEntry('TEST', 'A test crate is a rehearsal', 'Use <b>TEST</b> in REFIT to watch sample crates travel. That checks the visible route; it does not prove a real agent completed a job. Run real work and inspect its session and output afterward.')
+        + fmEntry('BRANCHES', 'Add steps when you need them', '<b>FILTER</b> selects by tag. <b>MERGER</b> brings lanes together. <b>SPLITTER</b> fans work into branches and needs at least two outgoing lanes. Assign agents to bays, not to belt tiles.')
+        + fmMission('Start with a layout', 'Press <kbd>9</kbd> for <b>LAYOUTS</b> in REFIT, choose a starter line, and place it. Inspect the bays and feed before running your job.')
+        + '<p class="fm-note"><b>Recipes = WHAT.</b> A job to launch. <b>Skills = HOW.</b> Reusable instructions. <b>Routines = WHEN.</b> Scheduled work. <b>Loops = UNTIL.</b> Repeated work with a stopping condition.</p>'
+        + fmAction('automation', 'OPEN AUTOMATION');
     }
-    return '<p class="fm-lead">your agent grows off real outcomes — no fake bars.</p>'
-      + fmEntry('REAL', 'LEVEL / XP', 'climbs only on real shipped work; never drops. the top-bar STATION chip is every agent’s level, rolled up.')
-      + fmEntry('REAL', 'CONFIDENCE', 'a reliability read that moves both ways. shows “—” until it has enough real runs to be honest.')
-      + fmEntry(null, 'where to look', 'open a dossier → GROWTH for the bars, the confidence gauge, and the milestone case.');
+    if (tab === 'PROGRESS') {
+      return '<p class="fm-lead">The campaign is your real life. Set a goal, take useful steps, and record what changed.</p>'
+        + fmEntry('YOU', 'Commander progress', 'Open <b>WORK › QUESTS</b> to reach the QUEST LOG. Define a life goal and what success means. Record completed actions and metrics as you go. Confirm the outcome when it actually happens: finishing the plan alone does not complete the goal.')
+        + fmMission('Name a finish line you can recognize', '<b>Goal:</b> play a song for a friend. <b>Success:</b> play the whole song without stopping. <b>First step:</b> practise the chorus. Record the practice now; confirm the goal after the performance.')
+        + fmEntry('CREW', 'Agent experience', 'Positive feedback on agent work grows that agent’s XP. Your Commander journey and the crew’s track record are separate. Neither level locks capabilities behind a grind.')
+        + fmEntry('NEXT STEP', 'Keep the plan useful', 'Use the QUEST LOG to report progress, extend a plan, or defer a suggestion that does not fit. The station can suggest a next action; you decide whether it belongs in your life.')
+        + fmAction('quests', 'OPEN QUEST LOG');
+    }
+    return '<p class="fm-lead">When the station stalls, follow the evidence. Start with the message beside the job.</p>'
+      + fmEntry('NO REPLY', 'Check the connection', 'Open <b>SYSTEM › SETTINGS</b> and check the selected provider’s sign-in or key. Check the agent’s model in COMMS. Read the error before retrying; a missing connection needs fixing first.')
+      + fmEntry('WAITING', 'Look for a decision', 'Return to the job’s COMMS session. Answer a context question or approve or deny the pending action. An unanswered question is not a running tool.')
+      + fmEntry('MISSING TOOL', 'Check ability &amp; reach', 'Inspect the agent in <b>CREW › AGENTS</b>. In <b>BUILD › ABILITIES</b>, check toolsets and connector status. Equipment, permissions, service sign-in, and operating-system access each affect what can run.')
+      + fmEntry('COLD LINE', 'Inspect feed, bay, and route', 'In REFIT, check the inbox feed, bay assignment, room computer, and belt connections. A sample crate moving does not establish that a real job ran.')
+      + fmEntry('WHERE IS IT?', 'Find the session or output', 'Return to <b>COMMS › Sessions</b> for the conversation. Open <b>WORK › DELIVERABLES</b> for generated files and apps. Check <b>TASKS</b> if it was planned board work.')
+      + fmEntry('STOP', 'Interrupt work', 'Use the stop control in COMMS for the current run. Stopping a run does not undo actions it already completed; inspect the result before starting again.')
+      + '<div class="fm-actions">' + fmAction('settings', 'OPEN SETTINGS') + fmAction('comms', 'RETURN TO COMMS') + '</div>';
   }
   function fillFieldManual(body) {
     if (!body) return;
-    let curTab = 'FIRST STEPS';
+    let curTab = manualStartChapter;
+    manualStartChapter = 'FIRST MISSION';
     body.classList.add('fm-body');
     const render = () => {
+      const page = FM_TABS.indexOf(curTab);
       body.innerHTML =
-        '<div class="fm-tabs">' + FM_TABS.map(t => '<button class="fm-tab' + (t === curTab ? ' on' : '') + '" aria-pressed="' + (t === curTab ? 'true' : 'false') + '" data-t="' + t + '">' + t + '</button>').join('') +
-        '</div><div class="fm-content">' + fmContent(curTab)
-        + (curTab === 'FIRST STEPS' ? '<button class="fm-tab fm-replay" type="button">REPLAY QUICK TOUR</button>' : '')
-        + '</div>';
-      body.querySelectorAll('.fm-tab[data-t]').forEach(b => { b.onclick = () => { curTab = b.dataset.t; sfx('click'); render(); }; });
+        '<header class="fm-cover"><h2>Your station guide</h2><p>Pick a topic. Find the next step and open the menu you need.</p></header>'
+        + '<nav class="fm-tabs" aria-label="Manual chapters">' + FM_TABS.map((t, i) => '<button type="button" class="fm-tab' + (t === curTab ? ' on' : '') + '" aria-pressed="' + (t === curTab ? 'true' : 'false') + '" data-t="' + t + '">' + t + '</button>').join('') +
+        '</nav><article class="fm-content" aria-label="' + curTab + '"><div class="fm-chapter"><span class="fm-eyebrow">CHAPTER ' + (page + 1) + ' / ' + FM_TABS.length + '</span><h2>' + curTab + '</h2></div>' + fmContent(curTab)
+        + (curTab === 'FIRST MISSION' ? '<button class="fm-action fm-replay" type="button">REPLAY QUICK TOUR</button>' : '')
+        + '</article><nav class="fm-pager" aria-label="Chapter navigation">'
+        + (page > 0 ? '<button type="button" class="fm-action" data-fm-page="' + (page - 1) + '">← ' + FM_TABS[page - 1] + '</button>' : '<span>YOUR STATION. YOUR PACE.</span>')
+        + (page < FM_TABS.length - 1 ? '<button type="button" class="fm-action" data-fm-page="' + (page + 1) + '">' + FM_TABS[page + 1] + ' →</button>' : '') + '</nav>';
+      const turn = t => {
+        curTab = t; sfx('click'); render(); body.scrollTop = 0;
+        const selected = body.querySelector('.fm-tab.on');
+        if (selected) selected.focus({ preventScroll: true });
+      };
+      body.querySelectorAll('.fm-tab[data-t]').forEach(b => { b.onclick = () => turn(b.dataset.t); });
+      body.querySelectorAll('[data-fm-page]').forEach(b => { b.onclick = () => turn(FM_TABS[Number(b.dataset.fmPage)]); });
+      body.querySelectorAll('[data-platform-start]').forEach(b => { b.onclick = () => openPlatformSetup(b.dataset.platformStart); });
+      body.querySelectorAll('[data-fm-open]').forEach(b => { b.onclick = () => {
+        if (typeof StationUI === 'undefined') return;
+        const target = b.dataset.fmOpen;
+        StationUI.closeTerm('manual');
+        if (target === 'comms') { const input = document.getElementById('chat-input'); if (input) input.focus(); }
+        else if (target === 'refit') { const build = document.getElementById('bb-build'); if (build) build.click(); }
+        else StationUI.openTerm(target);
+      }; });
       const replay = body.querySelector('.fm-replay');
       if (replay) replay.onclick = () => { sfx('click'); replayFirstCommand(); };
     };
@@ -1086,7 +1230,8 @@ const Tutorial = (() => {
     hideBrief(); clearCoach(); clearSpot();
     // The manual is a real floating window; close it before opening the Dialogue tour so it cannot cover the lesson.
     try { if (typeof StationUI !== 'undefined' && StationUI.closeTerm) StationUI.closeTerm('manual'); } catch (_) {}
-    firstCommand({ name: agentName, replay: true });
+    // Returning users have no in-memory onboarding name; resolve the current station identity.
+    firstCommand({ name: agentLabel(), replay: true });
     return active;
   }
 
@@ -1127,8 +1272,8 @@ const Tutorial = (() => {
   function isCoaching() { return !!(active || kitMode || coach); }
 
   return {
-    firstCommand, replayFirstCommand, spotlight, seen, markSeen, _state: () => state,
-    onBuildOpen, onPropPlaced, onBeltPlaced, onConnectorPlaced, onLevelUp, clearCoach,
+    firstCommand, replayFirstCommand, showPlatformConnections, openPlatformSetup, platformGuideHTML, wirePlatformGuide, spotlight, seen, markSeen, _state: () => state,
+    onBuildOpen, onEquipmentInspect, onPropPlaced, onBeltPlaced, onConnectorPlaced, onLevelUp, clearCoach,
     onEnterGame, fillFieldManual, showBrief, tickBrief, teardown, reset, isCoaching, watchConnectors
   };
 })();

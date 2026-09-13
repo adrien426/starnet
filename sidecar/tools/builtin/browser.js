@@ -19,7 +19,9 @@
   const FS = require('node:fs');
   const CP = require('node:child_process');
   const NET = require('node:net');
+  const { swallow } = require('../../failopen.js');
   const Challenge = require('./browserchallenge.js');
+  const { deriveReadClient } = require('./browser-workflow.js');
   // UNTRUSTED-CONTENT FENCE (2026-07-25): page text, snapshots, console rows and dialog messages are all
   // authored by the SITE, not the Commander. web_* has fenced since the web lane; these reads did not, so
   // the most direct "read a hostile page" path arrived raw. Same marker pair as web — one model contract.
@@ -1388,17 +1390,29 @@
        one was. Offsets accumulate down the tree so every coordinate is in TOP-page space. */
     function snapshotExpr(cap) {
       return `(() => {
-        const q = 'a,button,input,textarea,select,[role="button"],[onclick],summary,label';
+        const q = 'a,button,input,textarea,select,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"],[tabindex]:not([tabindex="-1"]),[onclick],summary,label';
         const out = [];
         const visit = (doc, dx, dy, frame, depth) => {
           if (!doc || depth > 4 || out.length >= ${cap}) return;
-          for (const el of doc.querySelectorAll(q)) {
+          // Framework handlers usually live on DOM properties or delegated listeners, not HTML
+          // onclick attributes. A pointer cursor is a candidate hint, not proof a click succeeded.
+          // Walk open shadow roots too; querySelectorAll never crosses that boundary by itself.
+          for (const el of doc.querySelectorAll('*')) {
+            if (out.length >= ${cap}) return;
+            if (el.shadowRoot) visit(el.shadowRoot, dx, dy, frame, depth + 1);
             if (out.length >= ${cap}) return;
             const r = el.getBoundingClientRect();
             const x = r.left + dx, y = r.top + dy;
             if (!(r.width > 1 && r.height > 1 && y + r.height >= 0 && x + r.width >= 0 && y <= innerHeight && x <= innerWidth)) continue;
+            const view = el.ownerDocument.defaultView;
+            const style = view.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.display === 'none') continue;
+            const parent = el.parentElement || (el.getRootNode().host || null);
+            const pointer = style.cursor === 'pointer' && (!parent || view.getComputedStyle(parent).cursor !== 'pointer');
+            const semantic = el.matches(q);
+            if (!semantic && typeof el.onclick !== 'function' && !pointer) continue;
             const tag = el.tagName.toLowerCase();
-            const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag === 'input' || tag === 'textarea' ? 'textbox' : tag);
+            const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag === 'input' || tag === 'textarea' ? 'textbox' : semantic ? tag : 'clickable');
             const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 160);
             const node = { index: out.length, role, text, x: Math.round(x), y: Math.round(y), w: Math.round(r.width), h: Math.round(r.height) };
             if (frame) node.frame = frame;
@@ -1958,14 +1972,27 @@
     }
     async function close() {
       const owned = proc, waitForClose = procClosePromise;
-      try { cdp && cdp.close(); } catch (_) {}
-      try { owned && owned.kill('SIGKILL'); } catch (_) {}
-      cdp = null; proc = null;
-      if (owned && waitForClose) {
+      async function exitedWithin(ms) {
+        if (!waitForClose) return false;
         let timer;
-        const timed = new Promise(resolve => { timer = setTimeout(() => resolve(false), 3000); if (timer.unref) timer.unref(); });
-        const exited = await Promise.race([waitForClose, timed]);
-        clearTimeout(timer);
+        try { return await Promise.race([waitForClose, new Promise(resolve => { timer = setTimeout(() => resolve(false), ms); })]); }
+        finally { clearTimeout(timer); }
+      }
+      // Only OUR persistent browser: a forced kill can lose newly written login cookies. Browser.close
+      // flushes Chromium's profile stores. An attached user browser has no owned process and is never closed.
+      let exited = false;
+      if (owned && cdp && deps.profileIsPersistent) {
+        let timer;
+        try {
+          await Promise.race([cdp.send('Browser.close').catch(swallow('browser.profile.close')), new Promise(resolve => { timer = setTimeout(resolve, 1500); })]);
+        } finally { clearTimeout(timer); }
+        exited = await exitedWithin(2000);
+      }
+      try { cdp && cdp.close(); } catch (_) {}
+      try { if (owned && !exited) owned.kill('SIGKILL'); } catch (_) {}
+      cdp = null; proc = null;
+      if (owned && waitForClose && !exited) {
+        exited = await exitedWithin(3000);
         if (!exited) throw new Error('owned Chromium did not exit after synthetic test session closed');
       }
       if (deps.cleanupProfile === true) { try { FS.rmSync(profileDir, { recursive: true, force: true }); } catch (_) {} }
@@ -1997,8 +2024,7 @@
     // ONE durable station browser profile (cookies survive run end and sidecar restarts). acquire/release is
     // an in-process single-owner lease supplied by the host — Chrome cannot share a user-data-dir between
     // processes, and one-sidecar-per-save-dir is a hard invariant, so an in-process lease is sufficient.
-    // Every run TRIES the persistent profile first (so research runs browse with saved logins) and quietly
-    // falls back to the caller's ephemeral profile when another run holds the lease.
+    // Ordinary tools wait for this profile; contention must never change account/session identity.
     let leaseHeld = false;
     /* ATTACH state. Sticky for the life of the session: once a run has driven the Commander's own browser
        it must not be able to quietly drop back to "ordinary headless" and re-open the eval door — the
@@ -2017,7 +2043,28 @@
     }
     function profileDeps() {
       // cleanupProfile:false is load-bearing — the durable profile must never ride the ephemeral rm on close.
-      return acquirePersistent() ? { profileDir: deps.persistentProfile.dir, cleanupProfile: false, profileIsPersistent: true } : { profileIsPersistent: false };
+      if (acquirePersistent()) return { profileDir: deps.persistentProfile.dir, cleanupProfile: false, profileIsPersistent: true };
+      if (deps.persistentProfile && !attachedToUserBrowser) throw new Error('the station browser profile is in use by another agent run — retry after it finishes; saved logins were not replaced');
+      return { profileIsPersistent: false };
+    }
+    async function waitForProfile(signal) {
+      if (!deps.persistentProfile || attachedToUserBrowser || leaseHeld) return;
+      const limit = deps.profileWaitMs == null ? 8000 : Math.max(0, Math.min(8000, deps.profileWaitMs));
+      let reported = false;
+      try {
+      for (let elapsed = 0; ; elapsed += 100) {
+        if (signal && signal.aborted) throw new Error('browser session wait cancelled');
+        if (acquirePersistent()) return;
+        if (!reported && typeof deps.onProfileWait === 'function') { deps.onProfileWait(true); reported = true; }
+        if (elapsed >= limit) throw new Error('the station browser profile is in use by another agent run — retry after it finishes; saved logins were not replaced');
+        await new Promise((resolve, reject) => {
+          const done = () => { if (signal) signal.removeEventListener('abort', cancel); resolve(); };
+          const timer = setTimeout(done, 100);
+          const cancel = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(new Error('browser session wait cancelled')); };
+          if (signal) signal.addEventListener('abort', cancel, { once: true });
+        });
+      }
+      } finally { if (reported) deps.onProfileWait(false); }
     }
     function releasePersistent() {
       const pp = deps.persistentProfile;
@@ -2317,7 +2364,7 @@
         }
         return { ok: true, browser: String(v.Browser || 'Chrome'), port: port };
       } catch (e) {
-        return { ok: false, error: 'browser.attach: nothing is listening on 127.0.0.1:' + port + '. Start Chrome with --remote-debugging-port=' + port + ' first (quit Chrome completely first, or the flag is ignored by the already-running instance).' };
+        return { ok: false, error: 'browser.attach: nothing is listening on 127.0.0.1:' + port + '. Use browser.login for a saved StarNet session. Advanced attachment requires Chrome launched with --remote-debugging-port=' + port + ' and a separate --user-data-dir; current Chrome does not expose its default profile this way.' };
       }
     }
     async function detach() {
@@ -2432,7 +2479,7 @@
        Credentials are typed into real Chrome by the human; they never transit the agent or the sidecar.
        Fail-closed inheritance: both asks ride the run's consent channel (auto-deny on timeout/disconnect),
        and env-pinned headless (CI/soak) refuses before any window can appear. */
-    async function login(url) {
+    async function login(url, signal) {
       const attended = deps.attendedLogin;
       if (!attended || typeof attended.prompt !== 'function') {
         throw new Error('browser.login needs a watched COMMS session — an unattended run cannot open a login window for the Commander');
@@ -2450,9 +2497,7 @@
       // The durable profile is what makes the login outlive this run. When a host wires one, contention is a
       // hard stop (logging into a throwaway profile would silently lose the session at run end — dishonest);
       // a host with NO persistent profile still gets a within-run login on its ephemeral profile.
-      if (deps.persistentProfile && !acquirePersistent()) {
-        throw new Error('the station browser profile is in use by another agent run — retry after it finishes');
-      }
+      await waitForProfile(signal);
       // Headed + real input: forceHeadless is HOST authority for model-driven navigation; this relaunch is
       // human-consented (the prompt above), so it may override it. syntheticInputOnly:false drops the popup
       // block and input shims — SSO login flows need real popups and the human's real pointer.
@@ -2493,7 +2538,7 @@
       const d = driver || null;
       return d && typeof d.attachedPort === 'function' ? d.attachedPort() : null;
     }
-    return { navigate, snapshot, click, type, press, hover, drag, select: selectOption, viewport, forward, upload, tabs, selectTab, closeTab, inspect, evalPublic, evalAllowed, wait, find, pdf, intercept, emulate, attach, detach, attachedToUser: () => attachedToUserBrowser, testInput, testEval, testState, testSnapshot, scroll, back, getText, challengeStatus, consoleLog, networkLog, dialog, vision, screenshot, login, close, visible, headlessFallback, attachedPort, lastResponse, _internals: { refs, version: () => version, navEpoch: () => navEpoch, localMode: () => localMode, localOrigin: () => localOrigin, leaseHeld: () => leaseHeld } };
+    return { waitForProfile, navigate, snapshot, click, type, press, hover, drag, select: selectOption, viewport, forward, upload, tabs, selectTab, closeTab, inspect, evalPublic, evalAllowed, wait, find, pdf, intercept, emulate, attach, detach, attachedToUser: () => attachedToUserBrowser, testInput, testEval, testState, testSnapshot, scroll, back, getText, challengeStatus, consoleLog, networkLog, dialog, vision, screenshot, login, close, visible, headlessFallback, attachedPort, lastResponse, _internals: { refs, version: () => version, navEpoch: () => navEpoch, localMode: () => localMode, localOrigin: () => localOrigin, leaseHeld: () => leaseHeld } };
   }
 
   function makeBrowserTools(deps) {
@@ -2623,7 +2668,7 @@
          this file drives a browser the station owns; this one drives the Commander's, where every account
          they have is already signed in. The consent card is the only place a human sees that difference
          before it happens, so `false` is never passed for the consent flag here. */
-      exec('browser.attach', 'Drive the Commander\'s OWN already-running Chrome instead of the station browser — their real profile, so every site they are signed into is already signed in. They must have started Chrome with --remote-debugging-port=<port> (quitting Chrome fully first, or the flag is ignored). Use this when a task needs a real logged-in session that browser.login cannot supply. browser.eval stays refused while attached. browser.detach lets go without closing their browser.',
+      exec('browser.attach', 'Attach to an explicitly prepared Chrome debugging session. Prefer browser.login for guided sign-in with a reusable StarNet profile. Advanced attachment requires --remote-debugging-port=<port> and a separate --user-data-dir; current Chrome refuses debugging its default profile. Only accounts signed into that separate profile are available. Use this when a task needs a real logged-in session that browser.login cannot supply. browser.eval stays refused while attached. browser.detach lets go without closing their browser.',
         { type: 'object', required: ['port'], properties: { port: { type: 'number' } } },
         async a => {
           const r = await session.attach(a.port);
@@ -2646,7 +2691,7 @@
             return {
               content: 'No visible element matches ' + what + ' in the current viewport. Scanned ' + r.scanned + ' visible interactive element(s)'
                 + (r.capped ? ' and reached the 200-element scan cap.' : '.')
-                + ' The target may be off-screen, inside a closed menu, or not loaded yet; scroll or open the menu and try again, or use browser.wait.',
+                + ' The target may be off-screen, inside a closed menu, not loaded yet, or rendered without discoverable interaction semantics. Use browser.get_text or browser.vision to distinguish these; scroll or open the menu and try again, or use browser.wait when content is loading. Do not repeat unchanged searches or screenshots. browser.click requires a discovered ref; browser.test_input is only for owned local test pages, not a coordinate-click fallback for this website. If a fresh read and targeted recovery still cannot expose the target, report the limitation and current page instead of looping.',
               summary: 'no match'
             };
           }
@@ -2756,11 +2801,15 @@
           const v = r && r.value;
           return { content: typeof v === 'string' ? v : JSON.stringify(v), summary: 'eval' };
         }),
-      read('browser.network', 'List the network requests the CURRENT page made — method, URL, type, HTTP status, size, and any transport failure. Use this when a page "did nothing": it separates a 401/403, a request that failed outright, and a request that was never made. "filter" matches the URL; "failedOnly" shows just errors and non-2xx.', { type: 'object', properties: { limit: { type: 'number' }, filter: { type: 'string' }, failedOnly: { type: 'boolean' } } },
+      read('browser.network', 'List observed requests from the current page. filter matches the URL; failedOnly shows errors. deriveReadClient returns runnable Node.js GET client templates for observed successful Fetch/XHR requests, without capturing credentials or executing traffic. Use this to learn a repeated read-only website lookup; verify the client against the browser before saving it as a skill.', { type: 'object', properties: { limit: { type: 'number' }, filter: { type: 'string' }, failedOnly: { type: 'boolean' }, deriveReadClient: { type: 'boolean' } } },
         async a => {
           let rows = session.networkLog(a.limit || 60);
           if (a.filter) { const f = String(a.filter).toLowerCase(); rows = rows.filter(r => String(r.url).toLowerCase().indexOf(f) >= 0); }
           if (a.failedOnly === true) rows = rows.filter(r => r.failure || (r.status && (r.status < 200 || r.status >= 300)));
+          if (a.deriveReadClient === true) {
+            const derived = deriveReadClient(rows);
+            return { content: fenceExternal(JSON.stringify(derived, null, 2), 'observed website request templates; unverified external data'), summary: derived.candidates.length + ' read-only client candidate(s), unverified' };
+          }
           if (!rows.length) return { content: 'No matching network requests were recorded for this page.', summary: '0 requests' };
           const line = r => (r.method || 'GET') + ' ' + (r.status ? r.status : (r.failure ? 'FAILED' : 'pending')) +
             ' ' + clamp(r.url, 200) + (r.type ? ' [' + r.type + ']' : '') +
@@ -2792,13 +2841,13 @@
       // job of this bound is to stop a wedged flow from pinning the run forever.
       {
         name: 'browser.login', capability: 'web', impact: 'synthetic-browser', scope: 'execute', requiresConsent: false, timeoutMs: 60 * 60 * 1000,
-        description: 'Ask the Commander to open a VISIBLE browser window and log in to a site THEMSELVES (their password is typed into real Chrome — it never passes through you; never ask for credentials in chat). Blocks until they finish, then returns to headless mode with the authenticated session. Cookies persist in the station browser profile, so future runs stay signed in. Use only when a site genuinely requires login; works only in a watched COMMS session.',
+        description: 'Ask the Commander to open a VISIBLE browser window and log in to a site THEMSELVES (their password is typed into real Chrome — it never passes through you; never ask for credentials in chat). Blocks until they finish, then returns to headless mode. Verify the signed-in account on the page after Done; confirmation alone does not prove authentication. Cookies persist in the station browser profile, so future runs stay signed in. Use only when a site genuinely requires login; works only in a watched COMMS session.',
         schema: { type: 'object', required: ['url'], properties: { url: { type: 'string' } } },
-        run: async a => {
-          const r = await session.login(a.url);
+        run: async (a, ctx) => {
+          const r = await session.login(a.url, ctx && ctx.signal);
           if (r.status === 'declined') return { content: 'Commander declined to open a login window for ' + r.host + '. Continue without authentication and say what is blocked.', summary: 'login declined' };
           if (r.status === 'unconfirmed') return { content: 'Login window for ' + r.host + ' closed without a Done confirmation. Any cookies the site set were saved to the station profile; verify with browser.navigate whether you are signed in before relying on it.', summary: 'login unconfirmed' };
-          return { content: 'Commander finished logging in at ' + r.host + '. The browser is back in headless research mode with the authenticated session — continue with browser.navigate.', summary: 'login done' };
+          return { content: 'Commander finished logging in at ' + r.host + '. The browser is back in headless research mode. Done is a human confirmation, not authentication proof: use browser.navigate to verify the account and access before continuing.', summary: 'login done' };
         }
       },
       read('browser.vision', 'Capture the current viewport and answer a question about what is on screen (vision rides the session\'s own model when no dedicated vision key exists — never ask the user for an API key). If no vision route is available this returns a clear "unavailable" result — it never fabricates a description.', { type: 'object', properties: { question: { type: 'string' } } },
@@ -2894,6 +2943,16 @@
           return { content: 'Emulating: ' + parts.join(', ') + '. Take a fresh browser.snapshot — earlier refs expired. reset:true clears it.', summary: 'emulating ' + (a.device || parts.join(',')) };
         }, false)
     ];
+    // Reserve before driver creation, within the tool's existing abort/timeout budget. Local test tools
+    // and explicit attach/detach retain their separate lifecycle; login keeps its human-consent boundary.
+    for (const tool of tools) {
+      if (/^browser\.(test_|attach$|detach$|login$)/.test(tool.name)) continue;
+      const run = tool.run;
+      tool.run = async (args, ctx) => {
+        if (typeof session.waitForProfile === 'function') await session.waitForProfile(ctx && ctx.signal);
+        return run(args, ctx);
+      };
+    }
     return { tools, session, register(reg) { tools.forEach(t => reg.register(t)); return reg; }, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, CHROME_CANDIDATES } };
   }
 

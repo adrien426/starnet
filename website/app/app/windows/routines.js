@@ -77,42 +77,35 @@
       // re-slots it under its row after each refresh.
       '<div id="rt-out" class="msg rt-out" hidden></div>';
     const secCreate =
-      '<div class="brief-block"><div class="brief-k">HOW IT WORKS</div>' +
-        '<div class="brief-v">A routine wakes on a schedule and runs your agent <b>unattended</b>, using your connected key + model. ' +
-        'With no one watching, ungranted file writes are denied silently unless you have pre-approved them. ' +
-        // TERMINAL HONESTY (2026-07-25, from a user report): web/files/memory/images/browser all work unattended,
-        // but shell.exec + verify.run need the explicit per-routine grant below (the #rt-term checkbox) — the
-        // authority gate strips them on every non-interactive surface otherwise, and placing a WORKBENCH on the
-        // floor does NOT grant them here. Users were writing "run my tests nightly" routines, getting nothing,
-        // and placing a workbench to fix it. Say both halves where the routine is actually written.
-        'Web, files, memory, images and the browser all work. The <b>terminal</b> and your <b>connected tools</b> are ' +
-        'off unless you grant them below — placing a WORKBENCH on the floor does not grant them to a routine.</div></div>' +
-      '<div class="mc-form">' +
-        '<input id="rt-name" class="key-input" placeholder="name — e.g. Morning AI brief" maxlength="80" autocomplete="off">' +
-        '<textarea id="rt-prompt" class="key-input" rows="2" placeholder="what should it do each run? e.g. search for new AI-policy news and summarize the top 3" style="resize:vertical"></textarea>' +
+      '<div class="mc-form rt-simple-create">' +
+        '<div class="rt-identity"><label class="sn-menu-field">Name<input id="rt-name" class="key-input" placeholder="e.g. Morning research brief" maxlength="80" autocomplete="off"></label>' +
+        '<label class="sn-menu-field">Agent<select id="rt-agent-select" class="key-input">' + roster.map(a => '<option value="' + esc(a.id) + '"' + (a.id === routineAgentId ? ' selected' : '') + '>' + esc(a.name || a.id) + '</option>').join('') + '</select></label></div>' +
+        '<div hidden><div class="rt-agent-pick">' + roster.map(agentButton).join('') + '</div></div><input id="rt-agent" type="hidden" value="' + esc(routineAgentId) + '">' +
+        '<label class="sn-menu-field">What should it do?<textarea id="rt-prompt" class="key-input" rows="2" placeholder="e.g. Find three research updates and summarize them with source links." style="resize:vertical"></textarea></label>' +
         // WHEN — the schedule PICKER (frontend/app/schedpicker.js). It owns the `#rt-sched` text input and
         // types into it, so the preview below, #rt-add, the QA journey and every existing selector are
         // unchanged; without the module we fall back to that same bare input, never to a dead form.
-        '<div class="rt-when" id="rt-when"><div class="rt-when-k">WHEN SHOULD IT RUN?</div>' +
+        '<div class="rt-when" id="rt-when"><div class="rt-when-k">When</div>' +
         (typeof SchedPicker !== 'undefined'
-          ? SchedPicker.html({ inputId: 'rt-sched' })
+          ? SchedPicker.html({ inputId: 'rt-sched', compact: true })
           : '<input id="rt-sched" class="key-input" placeholder="schedule — every 30m · 0 9 * * * · in 2h" autocomplete="off">') +
         '</div>' +
         '<div id="rt-preview" class="dim" style="min-height:1em;font-size:.9em"></div>' +
-        '<div class="rt-agent-pick" role="group" aria-label="Routine agent">' + roster.map(agentButton).join('') + '</div>' +
-        '<input id="rt-agent" type="hidden" value="' + esc(routineAgentId) + '">' +
-        '<details class="brief-block" style="margin:4px 0"><summary>ADVANCED RUNTIME</summary>' +
-          '<div class="mc-form" style="margin-top:8px">' +
-            '<input id="rt-skills" class="key-input" placeholder="saved skills (comma-separated names)">' +
-            '<input id="rt-context" class="key-input" placeholder="upstream routine ids (comma-separated)">' +
-            '<input id="rt-workdir" class="key-input" placeholder="approved project folder (optional absolute path)">' +
-            '<input id="rt-script" class="key-input" placeholder="pre-check script (relative to workspace/project)">' +
-            '<label class="rt-term"><input type="checkbox" id="rt-no-agent"> script only — do not call a model</label>' +
-            '<input id="rt-toolsets" class="key-input" placeholder="allowed toolsets (comma-separated; blank = station defaults)">' +
-            '<select id="rt-deliver" class="key-input"><option value="local">keep result in StarNet</option><option value="origin">return result to this conversation</option></select>' +
-            '<label class="rt-term"><input type="checkbox" id="rt-continue"> keep delivery continuable in its conversation</label>' +
-          '</div>' +
-        '</details>' +
+        '<details class="sn-menu-options"><summary>Access &amp; other options</summary>' +
+          '<div class="sn-menu-tabs" role="group" aria-label="Advanced schedule options">' +
+          ['Context', 'Execution', 'Delivery', 'Access'].map((label, i) => '<button type="button" data-auto-tab="' + i + '" aria-pressed="' + (i === 0) + '">' + label + '</button>').join('') + '</div>' +
+          '<div data-auto-panel="0"><p class="sn-menu-note">Give each run the files and background it needs.</p>' +
+            '<label class="sn-menu-field">Project folder<input id="rt-workdir" class="key-input" placeholder="Approved absolute path (optional)"></label>' +
+            '<label class="sn-menu-field">Saved skills<input id="rt-skills" class="key-input" placeholder="Skill names, separated by commas"></label>' +
+            '<label class="sn-menu-field">Results from other routines<input id="rt-context" class="key-input" placeholder="Routine IDs, separated by commas"></label></div>' +
+          '<div data-auto-panel="1" hidden><p class="sn-menu-note">Optional script and tool restrictions for this job.</p>' +
+            '<label class="sn-menu-field">Pre-check script<input id="rt-script" class="key-input" placeholder="Path relative to the project"></label>' +
+            '<label class="rt-term"><input type="checkbox" id="rt-no-agent"> Run the script only, without a model</label>' +
+            '<label class="sn-menu-field">Allowed toolsets<input id="rt-toolsets" class="key-input" placeholder="Comma-separated; blank uses station defaults"></label></div>' +
+          '<div data-auto-panel="2" hidden><p class="sn-menu-note">Choose where the result goes.</p>' +
+            '<label class="sn-menu-field">Result destination<select id="rt-deliver" class="key-input"><option value="local">Keep in StarNet</option><option value="origin">Return to this conversation</option></select></label>' +
+            '<label class="rt-term"><input type="checkbox" id="rt-continue"> Allow follow-up in that conversation</label></div>' +
+        '<div data-auto-panel="3" hidden><p class="sn-menu-note">This routine inherits the agent’s existing access. Extra unattended permissions are off unless you grant them below. Placing a WORKBENCH on the floor does not grant them.</p>' +
         // UNATTENDED TERMINAL GRANT — default OFF, and it must stay a deliberate tick: this is the one control
         // that lets a scheduled run execute commands with nobody watching. The label states the risk plainly
         // rather than selling the feature (truthful telemetry applies to consent copy too).
@@ -129,7 +122,9 @@
           '<span>Let this routine use your <b>connected tools</b> ' +
           '<span class="dim">— the MCP connectors you set up in ⇄ ABILITIES, called unattended on your behalf. Connectors you switched off stay off.</span></span>' +
         '</label>' +
-        '<button class="bb sm" id="rt-add">+ ADD ROUTINE</button>' +
+        '</div>' +
+        '</details>' +
+        '<div id="rt-create-state" class="set-about" role="status">Checking scheduling status…</div><button class="bb sm" id="rt-add">SAVE SCHEDULE</button>' +
       '</div>' +
       '<div id="rt-msg" class="msg"></div>';
     const frag = h => (el => { el.innerHTML = h; });
@@ -308,11 +303,16 @@
     }
     async function refresh() {
       try {
-        const j = await Harness.api.get('/api/cron');
+        // Publish the same read-back to the widget rail and every scheduler consumer.
+        // Otherwise create/arm/pause updates this panel while NEXT ROUTINE lags a full poll.
+        const j = typeof QuerySpine !== 'undefined' && QuerySpine.refresh
+          ? (await QuerySpine.refresh('cron')).data : await Harness.api.get('/api/cron');
         const jobs = (j && j.jobs) || [];
         // the live cronArmed — feeds the create-confirm's honest arm-state line. A HALTED scheduler is not armed no
         // matter what the intent flag says, or the create-confirm promises a fire that an E-STOP is holding down.
         schedulerArmed = !!(j && j.enabled && !j.halted);
+        const createState = body.querySelector('#rt-create-state');
+        if (createState) createState.textContent = schedulerArmed ? 'Scheduling is enabled. Saving adds this task to the schedule shown below.' : 'Scheduling is off. You can save a routine, but it will not run automatically until you enable scheduling in Active Routines.';
         maxConsecutive = (j && Number(j.maxConsecutiveFailures)) || 0;
         // DEGRADED STORE (routine hardening, 2026-08-21): GET /api/cron carries `degraded` when cron.jobs.json AND
         // its .bak were both unreadable at boot. The sidecar quarantined the file, froze the scheduler, and refuses
@@ -394,7 +394,12 @@
           });
         }
         positionOut();   // re-slot a live RUN NOW result under its row after the list re-renders (P0 #11)
-      } catch (_) { listEl.innerHTML = '<div class="mc-detail">sidecar offline — start it to manage routines.</div>'; }
+      } catch (_) {
+        schedulerArmed = false;
+        const createState = body.querySelector('#rt-create-state');
+        if (createState) createState.textContent = 'Scheduling status could not be checked. Reconnect to the station before relying on an automatic run.';
+        listEl.innerHTML = '<div class="mc-detail">sidecar offline — start it to manage routines.</div>';
+      }
     }
 
     // SELF-INITIATION: the agent reasons out a few standing-job proposals from the dossier, the Commander approves
@@ -415,11 +420,13 @@
        as a function so the RESCHEDULE editor previews through the IDENTICAL path: two implementations of
        "when does this run" would eventually disagree, and this panel's entire job is to be right about it. */
     function wirePreview(inp, pvEl) {
-      let pvTimer = null;
+      let pvTimer = null, previewRevision = 0;
       inp.addEventListener('input', () => {
       clearTimeout(pvTimer);
+      const revision = ++previewRevision;
       const v = inp.value.trim();
       if (!v) { pvEl.textContent = ''; return; }
+      pvEl.textContent = 'Checking next run…';
       pvTimer = setTimeout(async () => {
         try {
           // tz honesty in the PREVIEW too: the create POST sends the device zone, so a preview computed
@@ -431,7 +438,7 @@
             // relative-only line when the server didn't supply a localNext (interval/once).
             const ln = Array.isArray(r.localNext) ? r.localNext : [];
             const tzNote = (r.kind === 'cron' && r.tz && r.tz !== 'UTC') ? ' <span class="dim">[' + esc(r.tz) + ']</span>' : '';
-            const nxt = r.next.slice(0, 3).map((t, i) => {
+            const nxt = r.next.slice(0, 1).map((t, i) => {
               // r.next carries the AUTHORITATIVE instants; r.localNext is the server rendering them in the
               // SCHEDULE's zone, which for an interval or a one-shot is UTC. Rendering the same instant in
               // the VIEWER's zone stops the panel printing "9:30 PM UTC" under a picker that says 5:30 PM —
@@ -440,7 +447,7 @@
               const local = esc(wallClock(t) || ln[i] || '');
               return local ? (local + ' <span class="dim">(' + esc(fmtRel(t)) + ')</span>') : esc(fmtRel(t));
             }).join(', ');
-            pvEl.innerHTML = '✓ ' + esc(human(r.display)) + tzNote + ' → next: ' + nxt;
+            pvEl.innerHTML = '<span class="rt-next-label">Next run</span> ' + nxt;
           }
           else pvEl.innerHTML = '<span style="color:var(--bad)">' + esc((r && r.error) || 'unrecognized schedule') + '</span>';
         } catch (_) {}
@@ -457,8 +464,12 @@
       ? SchedPicker.mount(body.querySelector('#rt-when'), { onChange: () => sfx('click') })
       : null;
 
+    body.querySelector('#rt-agent-select').addEventListener('change', e => {
+      const btn = Array.from(body.querySelectorAll('.rt-agent-btn')).find(b => b.dataset.agent === e.target.value); if (btn) btn.click();
+    });
     body.querySelectorAll('.rt-agent-btn').forEach(btn => btn.addEventListener('click', () => {
       routineAgentId = btn.dataset.agent || 'agent';
+      body.querySelector('#rt-agent-select').value = routineAgentId;
       const input = body.querySelector('#rt-agent');
       if (input) input.value = routineAgentId;
       body.querySelectorAll('.rt-agent-btn').forEach(b => {
@@ -629,6 +640,10 @@
         const activeSession = (typeof Workstreams !== 'undefined' && Workstreams.active) ? Workstreams.active() : null;
         const r = await (await post('/api/cron', {
           name, prompt, schedule, agentId: agentId || undefined, provider, tz,
+          meta: body.querySelector('#rt-prompt').dataset.widgetId
+            ? { widgetId: body.querySelector('#rt-prompt').dataset.widgetId }
+            : body.querySelector('#rt-prompt').dataset.workflowTakeoverId
+              ? { workflowTakeoverId: body.querySelector('#rt-prompt').dataset.workflowTakeoverId } : undefined,
           unattendedGrants: grants.length ? grants : undefined,
           skills: split('#rt-skills'), contextFrom: split('#rt-context'),
           workdir: workdir || undefined, script: script || undefined,
@@ -654,6 +669,7 @@
           else notify('routine "' + (name || 'unnamed') + '" scheduled for ' + agentLabel(agentId || 'agent'), 'good');
           sfx('click');
           ['#rt-name', '#rt-prompt'].forEach(s => { body.querySelector(s).value = ''; });
+          delete body.querySelector('#rt-prompt').dataset.workflowTakeoverId;
           ['#rt-term', '#rt-conn'].forEach(s => { const el = body.querySelector(s); if (el) el.checked = false; });   // a grant is never sticky across creates
           // the WHEN selection SURVIVES a create (people add three morning routines in a row) — but a
           // sticky cadence with a cleared field would be a lie, so we re-emit it and let the preview

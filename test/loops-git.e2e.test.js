@@ -196,10 +196,15 @@ function makeRepo() {
     A.ok(fs.existsSync(path.join(repo, 'src', 'feature1.js')), 'feature1.js exists before the rejection');
     A.ok(fs.existsSync(path.join(repo, 'src', 'feature2.js')), 'feature2.js exists before the rejection');
 
-    const rej = await fetch(B + '/api/loops/verdict', {
+    const rejecting = fetch(B + '/api/loops/verdict', {
       method: 'POST', headers,
       body: JSON.stringify({ id, n: cands[0].n, verdict: 'rejected', note: 'wrong approach' })
     });
+    await sleep(25);
+    const competing = await fetch(B + '/api/loops/verdict', { method: 'POST', headers,
+      body: JSON.stringify({ id, n: cands[1].n, verdict: 'approved' }) });
+    A.eq(competing.status, 409, 'approval of a stacked candidate cannot race an in-flight rejection');
+    const rej = await rejecting;
     A.eq(rej.status, 200, 'the rejection is accepted');
     const rejBody = await rej.json();
     A.eq(rejBody.undone.sort((a, b) => a - b), [cands[0].n, cands[1].n], 'it reports undoing the rejected pass AND the one stacked on it');
@@ -213,8 +218,9 @@ function makeRepo() {
 
     // REVERT, NOT RESET — the original commits are all still reachable, so a mis-click is recoverable.
     A.ok(git(['cat-file', '-t', cands[0].commit]).trim() === 'commit', 'the rejected commit still exists (revert, never reset)');
-    A.ok(/loop: undo rejected #/.test(git(['log', '--format=%s', '-1'])), 'and the undo is itself a readable commit');
-    A.ok(git(['show', '--pretty=format:', '--name-only', 'HEAD']).indexOf('feature1.js') >= 0, 'the undo commit records what it removed');
+    // The live loop can commit another candidate between these reads. Inspect the exact undo receipt.
+    A.ok(/loop: undo rejected #/.test(git(['log', '--format=%s', '-1', rejBody.undoCommit])), 'and the undo is itself a readable commit');
+    A.ok(git(['show', '--pretty=format:', '--name-only', rejBody.undoCommit]).indexOf('feature1.js') >= 0, 'the undo commit records what it removed');
 
     // the row and the tree now agree
     const after = await (await fetch(B + '/api/loops', { headers })).json();

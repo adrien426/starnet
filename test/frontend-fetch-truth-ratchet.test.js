@@ -25,8 +25,8 @@ const THEN_DISCARD = /\.then\(\s*\(?\s*r\s*\)?\s*=>\s*r\.json\(\)\s*\)/g;
 
 /* Audited baseline (forward-slash paths relative to frontend/). Every file not listed must be CLEAN. */
 const BASELINE = {
-  'app/windows/connectors.js': 4, // refresh/connect x2/oauth-client POSTs: {} falls into the error/else branch (fail-closed); oauth-client recovers via a loud sign-in failure
-  'app/build.js': 2,              // cron preview + create: body carries ok/error from the cron API; the catch path reports "nothing was created"
+  'app/windows/connectors.js': 3, // refresh/connect POSTs: {} falls into the error/else branch (fail-closed); publisher Google registration removed the customer oauth-client POST
+  'app/build.js': 1,              // cron preview only; creation keeps HTTP status and confirms the saved job through a fresh list
 };
 
 function walk(dir, out) {

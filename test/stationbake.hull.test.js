@@ -106,15 +106,34 @@ const painted = sample('station', null, 6, 40)
 const nearest = c => Math.min(...painted.map(p => dist(p, c)));
 
 // the pre-axis shell, tone by tone — seam / rim+arc / bolt, then the six-stop skirt ramp
-for (const c of ['#231f17', '#28241b', '#302b21', '#0b0a07', '#100e09', '#16130d', '#1f1b12', '#2a251a', '#3f3a2c']) {
+// ...at the shell's EXPOSURE (2026-09-03): the whole exterior is scaled darker by one constant, so the
+// shipped ladder is expected at that exposure — the same tones, less light on them.
+const X = StationBake.HULL_EXPOSURE || 1;
+const exposed = (hex, k) => '#' + chan(hex).map(v => Math.max(0, Math.min(255, Math.round(v * k))).toString(16).padStart(2, '0')).join('');
+// the plate ring sits at the deck line and takes the full exposure
+for (const c0 of ['#231f17', '#28241b', '#302b21']) {
+  const c = exposed(c0, X);
   A.ok(nearest(c) <= 5, 'the default shell still LOOKS like the shipped one at ' + c + ' (off by ' + nearest(c) + ')');
 }
+// ...and the skirt FADES (2026-09-06): each stop of the ladder is read at its own exposure down the wall, foot
+// first — the same six tones, the light on them falling off from the deck line into the void. The chip's skirt
+// is the sampled height minus its plate ring (sampleHull's own split), so the ladder is asked at that height.
+const skirtH = 40 - Math.max(6, Math.min(12, Math.round(40 * 0.38)));
+const RX = StationBake.hullRampExposure ? StationBake.hullRampExposure(skirtH) : [X, X, X, X, X, X];
+A.eq(RX.length, 6, 'the fade answers one exposure per ramp stop');
+A.ok(RX.every((k, i) => i === 0 || k >= RX[i - 1] - 1e-9), 'the exposure never rises again on the way down the skirt');
+A.ok(RX[0] < RX[5], 'the skirt actually fades — its foot is darker than its top (' + RX[0].toFixed(3) + ' → ' + RX[5].toFixed(3) + ')');
+A.ok(Math.abs(RX[5] - X) < 0.05, 'the top of the skirt sits at the deck-line exposure (' + RX[5].toFixed(3) + ' vs ' + X + ')');
+['#0b0a07', '#100e09', '#16130d', '#1f1b12', '#2a251a', '#3f3a2c'].forEach((c0, i) => {
+  const c = exposed(c0, RX[i]);
+  A.ok(nearest(c) <= 5, 'the default skirt still LOOKS like the shipped ladder at ' + c + ' (stop ' + i + ', off by ' + nearest(c) + ')');
+});
 // ...and it is genuinely a skin: the same ladder in another colour, which the constants could not be
 A.ok(sig(sample('station', null, 6, 40)) !== sig(sample('station', '#2b3340', 6, 40)),
   'a station shell painted COBALT differs from the untouched shell');
 const white = sample('station', WorldModel.FLOOR_STYLES.white.base, 6, 40).map(o => o[5])
   .filter(c => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c));
-A.ok(Math.max(...white.map(c => { const [r, g, b] = chan(c); return 0.299 * r + 0.587 * g + 0.114 * b; })) > 100,
+A.ok(Math.max(...white.map(c => { const [r, g, b] = chan(c); return 0.299 * r + 0.587 * g + 0.114 * b; })) > 100 * X,
   'STATION in WHITE really is a white hull — the pre-axis shell could only ever be one grey');
 
 /* ---------- NOTHING OUTSIDE A ROOM IS PAINTED FROM A MODULE CONSTANT ----------
@@ -152,7 +171,7 @@ for (const sid of ordinary) {
 }
 for (const sid of ['white', 'bone']) {
   const peak = brightestOf('stucco', WorldModel.FLOOR_STYLES[sid].base);
-  A.ok(peak > 110, sid.toUpperCase() + ' actually renders bright on a shell — peak ' + Math.round(peak));
+  A.ok(peak > 110 * X, sid.toUpperCase() + ' actually renders bright on a shell — peak ' + Math.round(peak));
 }
 // ...and a white shell must still read as WHITE, not as a tint: near-neutral all the way up
 {

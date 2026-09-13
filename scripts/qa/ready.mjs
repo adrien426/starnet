@@ -139,9 +139,9 @@ export function checkBugRegister(input) {
   const c = input.counts || {};
   const p0 = num(c.P0), p1 = num(c.P1), p2 = num(c.P2);
   const blocking = p0 + p1;
-  const value = p0 + ' P0 Â· ' + p1 + ' P1 Â· ' + p2 + ' P2';
+  const value = p0 + ' P0 · ' + p1 + ' P1 · ' + p2 + ' P2';
   if (blocking > 0) {
-    return mk(false, blocking + ' open blocking bug' + (blocking === 1 ? '' : 's') + ' (' + p0 + ' P0 Â· ' + p1 + ' P1) â€” qa/bugs must be clear of P0/P1', value);
+    return mk(false, blocking + ' open blocking bug' + (blocking === 1 ? '' : 's') + ' (' + p0 + ' P0 · ' + p1 + ' P1) — qa/bugs must be clear of P0/P1', value);
   }
   return mk(true, 'no open/claimed P0/P1 bugs', value);
 }
@@ -193,6 +193,7 @@ export function checkJourneys(input, cfg) {
   const result = str(input.result).toLowerCase();
   const value = result.toUpperCase() + ' · ' + num(input.passed) + '/' + num(input.total) + ' assertions';
   if (result !== 'pass') return mk(false, 'last journeys run was ' + (result ? result.toUpperCase() : 'not a pass'), value);
+  if (input.fullSuite !== true) return mk(false, 'journeys receipt does not prove the full suite — run `npm run qa:journeys` without --only', value);
   if (!/^[0-9a-f]{40}$/i.test(str(input.trunkHead)) || str(input.trunkHead).toLowerCase() !== str(cfg.currentTrunk).toLowerCase()) {
     return mk(false, 'journeys did not run on the exact current trunk (' + (str(input.trunkHead).slice(0, 8) || 'missing') + ' vs ' + str(cfg.currentTrunk).slice(0, 8) + ')', value);
   }
@@ -596,7 +597,7 @@ if (INVOKED_DIRECTLY) {
   // ---- CHECK 3/4/5 inputs ----
   const jRead = readJsonMaybe(path.join(QA_DIR, 'journeys-last-run.json'));
   const journeysInput = jRead.missing ? { missing: true } : jRead.error ? { error: jRead.error }
-    : { stampIso: jRead.data.stampIso, trunkHead: jRead.data.trunkHead, result: jRead.data.result, passed: jRead.data.passed, total: jRead.data.total };
+    : { stampIso: jRead.data.stampIso, trunkHead: jRead.data.trunkHead, result: jRead.data.result, passed: jRead.data.passed, total: jRead.data.total, fullSuite: jRead.data.fullSuite };
 
   const bRead = readJsonMaybe(path.join(QA_DIR, 'beginner-last-run.json'));
   const beginnerInput = bRead.missing ? { missing: true } : bRead.error ? { error: bRead.error }

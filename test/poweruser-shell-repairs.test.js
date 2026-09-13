@@ -18,7 +18,7 @@ A.ok(!/StationUI\.notify\(agent\.name \+ ' is online/.test(app),
   'PL-02: resume/reload does not mint another persistent online notification');
 A.ok(/aria-label="Turn ' \+ \(s\.enabled \? 'off' : 'on'\) \+ ' ' \+ esc\(s\.name\)/.test(ui),
   'PL-04: each skill switch names its skill');
-A.ok(/aria-label="Read the ' \+ esc\(s\.name\) \+ ' recipe"/.test(ui),
+A.ok(/aria-label="Read instructions for ' \+ esc\(s\.name\)/.test(ui),
   'PL-04: each skill disclosure names its skill');
 A.ok(/function setSearchContext\(/.test(ui) && /con-sec-nomatch\s*\{\s*display:\s*none/.test(appCss),
   'PL-07: settings search highlights a matching section and hides irrelevant headings');
@@ -35,7 +35,7 @@ A.ok(/previews open safely inside StarNet/i.test(deliverables) && !/opaque-origi
 A.ok(/\.deliverables-toolbar/.test(style), 'PL-12: Deliverables toolbar has explicit themed layout');
 A.ok(/controls\.setAttribute\('aria-hidden', 'true'\)/.test(titlebar) && /b\.tabIndex = -1/.test(titlebar),
   'PL-14: duplicate web titlebar controls are removed from installed AX/tab order');
-A.ok(/\['active', 'ACTIVE'\]/.test(ui) && /READY TO REVIEW/.test(ui),
+A.ok(/\['active', 'IN PROGRESS \/ REVIEW'\]/.test(ui) && /running \+ ' RUNNING'/.test(ui) && /ready \+ ' READY TO REVIEW'/.test(ui),
   'PL-15: task-board aggregate distinguishes running from review-ready work');
 A.ok(/e\.key === 'Escape'[\s\S]{0,180}cinema/.test(warroom),
   'PL-16: Escape exits Cinema without toggling it on');

@@ -10,19 +10,22 @@
 (function () {
   if (!/[?&]crtlab\b/.test(location.search)) return;
 
-  const CRT_DEFAULTS = { scan: 0.43, pitch: 1, fade: 0.25, glow: 0.07, curve: 0.09, vig: 0.30, over: 1.20, dust: 0.5, aberr: 0.35, grain: 0.24 };
+  const CRT_DEFAULTS = { scan: 0.38, pitch: 1, fade: 0.25, glow: 0.13, curve: 0.09, vig: 0.30, over: 1.20, dust: 0.5, aberr: 0.2, grain: 0.16, bloom: 0.25, emit: 0.9, mask: 0, bleed: 0, roll: 0 };
+  if (typeof WorldRenderer !== 'undefined' && WorldRenderer.enabled()) Object.assign(CRT_DEFAULTS, WorldRenderer.PHOSPHOR);
+  if (CRT_DEFAULTS.sharpen == null) CRT_DEFAULTS.sharpen = 0;
+  if (CRT_DEFAULTS.film == null) CRT_DEFAULTS.film = 0;
   // MUST MIRROR StationBake.LIGHT — RESET writes these back over the live object (same contract as
   // WALL_DEFAULTS below). Dulled 2026-08-15 alongside the bake; a stale mirror here would make RESET
   // restore the brighter station that no longer ships.
-  const LIGHT_DEFAULTS = { ambient: 0.82, pool: 0.85, room: 0.48, corridor: 0.34, door: 0.42, floor: 0.2, crown: 0.45, pitch: 8 };
+  const LIGHT_DEFAULTS = { ambient: 0.82, pool: 0.85, room: 0.46, corridor: 0.34, door: 0.4, floor: 0.24, crown: 0.45, pitch: 8, reach: 1.3, falloff: 0.85, cool: 0.45, warm: 0.16, spill: 0.7 };
   // MUST MIRROR StationBake.SHAPE — same RESET-writes-these contract as WALL_DEFAULTS below.
   const SHAPE_DEFAULTS = { cornerN: 1 };
   /* MUST MIRROR StationBake.WALL EXACTLY — these are not just the readout's key list, RESET writes
      them back over the live object. They had drifted (up 9, side 12) behind the shipped 14/7, so
      RESET restored a state that never shipped and side 12 pushed the wall band past the hull
      silhouette it is pinned to. Add a WALL knob, add it here. */
-  const WALL_DEFAULTS = { up: 22, corUp: 12, skirt: 32, side: 7, capH: 4, sideCap: 5 };
-  const DEPTH_DEFAULTS = { wallShadow: 0.5, sheen: 0.14, cornerAO: 0.55, dither: 0.15, floorWear: 0.55, floorDetail: 1, deckSeam: 0.38, wallDetail: 1, poolAlbedo: 1, edgeAO: 1, southFoot: 0 };
+  const WALL_DEFAULTS = { up: 30, corUp: 30, skirt: 40, side: 7, capH: 4, sideCap: 5, hullLit: 0.70, hullVoid: 0.34 };
+  const DEPTH_DEFAULTS = { wallShadow: 0.5, sheen: 0.14, cornerAO: 0.55, dither: 0.12, floorWear: 0.55, floorDetail: 1, deckSeam: 0.38, wallDetail: 1, poolAlbedo: 1, edgeAO: 1, southFoot: 0 };
   // TUBE APERTURE — the CSS glass vignette over the feed (app.css :root --tube-*). NOT the barrel warp:
   // `curve` bows the picture, these dim its outer band, and they move independently. Seeded from the live
   // custom properties at build time so opening the lab can never itself change the shipped look.
@@ -30,7 +33,8 @@
   const TUBE_CSSVAR = { clear: ['--tube-clear', '%'], mid: ['--tube-mid', '%'], midA: ['--tube-mid-a', ''], edgeA: ['--tube-edge-a', ''], inset: ['--tube-inset', 'px'] };
 
   const PRESETS = {
-    'Clean (off)':     { crt: { scan: 0, fade: 0, dust: 0, aberr: 0, grain: 0 } },
+    'World II: phosphor': { crt: typeof WorldRenderer !== 'undefined' ? WorldRenderer.PHOSPHOR : { scan: 0.26, pitch: 1, fade: 0.18, curve: 0.06, vig: 0.20, over: 1.13, dust: 0.35, aberr: 0.08, grain: 0.06, bloom: 0.14 } },
+    'Clean (off)':     { crt: { scan: 0, fade: 0, dust: 0, aberr: 0, grain: 0, film: 0 } },
     'Soft fade':       { crt: { scan: 0.06, pitch: 2, fade: 1.0 } },
     'Faded film':      { crt: { scan: 0.05, pitch: 2, fade: 2.0 } },
     'Subtle lines':    { crt: { scan: 0.16, pitch: 2.5, fade: 0.6 } },
@@ -40,6 +44,16 @@
     'Dark + pools':    { light: { ambient: 0.82, pool: 1.0, floor: 0.26 } },
     // the pre-2026-08-15 station, for A/Bing the dulling pass against what shipped before it
     'Light: pre-08-15': { light: { ambient: 0.77, pool: 1, room: 0.6, corridor: 0.42, door: 0.5 } },
+    // the pre-2026-09-02 station: linear pool falloff, warm-black shadow, no film, no spill, pools at
+    // reach 1, plus the heavier scan/grain — A/B the whole glow-up against what shipped before it
+    'Light: pre-09-02': { light: { ambient: 0.82, pool: 0.85, room: 0.48, corridor: 0.34, door: 0.42, floor: 0.2, reach: 1, falloff: 0, cool: 0, warm: 0, spill: 0 }, crt: { scan: 0.43, grain: 0.24, aberr: 0.35 } },
+    // the pre-2026-09-03 world: no bloom, no prop light, no cast shadows' worth of light, thin film, faint dither — A/B the whole overhaul
+    'World: pre-09-03': { light: { warm: 0.14, floor: 0.26 }, depth: { dither: 0.15 }, crt: { bloom: 0, emit: 0 } },
+    // the tube before the 'old TV' pass — A/B the whole CRT treatment
+    'CRT: pre-09-03':  { crt: { scan: 0.38, pitch: 1, curve: 0.09, vig: 0.30, aberr: 0.2, bloom: 0, mask: 0, bleed: 0, roll: 0 } },
+    'CRT: old TV':     { crt: { scan: 0.46, pitch: 2, curve: 0.13, vig: 0.40, aberr: 0.3, bloom: 0.2, mask: 0.22, bleed: 0.2, roll: 0.12 } },
+    'CRT: heavy TV':   { crt: { scan: 0.55, pitch: 3, curve: 0.16, vig: 0.48, aberr: 0.45, bloom: 0.3, mask: 0.32, bleed: 0.3, roll: 0.2 } },
+    'Light: v1 (flat)': { light: { falloff: 0, cool: 0, warm: 0, spill: 0 } },
     // side is pinned at `pad` (7) — past it the wall band juts out of the station's own silhouette
     'Flat (old)':      { wall: { up: 0, corUp: 0, skirt: 12, side: 4 }, depth: { wallShadow: 0, sheen: 0, cornerAO: 0, dither: 0, floorWear: 0, floorDetail: 0, deckSeam: 0, wallDetail: 0, poolAlbedo: 0 } },
     'Tall halls':      { wall: { up: 10, corUp: 6, skirt: 32, side: 7 } },
@@ -48,7 +62,7 @@
     'Room: pre-08-08': { wall: { up: 14, corUp: 8, capH: 3 }, light: { pitch: 40 }, shape: { cornerN: 2 } },
     'Corner: chamfer': { shape: { cornerN: 1 } },
     'Corner: fillet':  { shape: { cornerN: 2 } },
-    'Depth+':          { crt: { dust: 0.5, aberr: 0.35, grain: 0.24 }, depth: { wallShadow: 0.5, sheen: 0.14, cornerAO: 0.55, dither: 0.15, floorWear: 0.55, floorDetail: 1, deckSeam: 0.38, wallDetail: 1, poolAlbedo: 1 } },
+    'Depth+':          { crt: { dust: 0.5, aberr: 0.2, grain: 0.16 }, depth: { wallShadow: 0.5, sheen: 0.14, cornerAO: 0.55, dither: 0.15, floorWear: 0.55, floorDetail: 1, deckSeam: 0.38, wallDetail: 1, poolAlbedo: 1 } },
     // A/B the WHOLE aperture — in-canvas vignette + overscan + the CSS glass together. `curve` is 0.09 in
     // every one of them: these change how much of the panel the picture gets, never how hard it bows.
     'Ap: old (tight)': { crt: { vig: 0.55, over: 1 },    tube: { clear: 50, mid: 82, midA: 0.34, edgeA: 0.82, inset: 60 } },
@@ -65,6 +79,8 @@
   const wall = () => (SB() && SB().WALL) || {};
   const depth = () => (SB() && SB().DEPTH) || {};
   const shape = () => (SB() && SB().SHAPE) || {};
+  const industrial = () => typeof IndustrialTextures !== 'undefined' && IndustrialTextures.status().requested
+    ? IndustrialTextures.lighting : null;
 
   // The tube dials have no engine object behind them (they ARE the CSS), so the lab owns the state: read the
   // shipped custom properties once, then push every edit straight back onto :root.
@@ -137,7 +153,7 @@
   let sliders = [];
   let readout;
   function syncReadout() {
-    if (readout) readout.value = JSON.stringify({ crt: pick(crt(), Object.keys(CRT_DEFAULTS)), tube: pick(tube(), Object.keys(TUBE_DEFAULTS)), light: pick(light(), Object.keys(LIGHT_DEFAULTS)), wall: pick(wall(), Object.keys(WALL_DEFAULTS)), depth: pick(depth(), Object.keys(DEPTH_DEFAULTS)), shape: pick(shape(), Object.keys(SHAPE_DEFAULTS)) }, null, 0);
+    if (readout) readout.value = JSON.stringify({ crt: pick(crt(), Object.keys(CRT_DEFAULTS)), tube: pick(tube(), Object.keys(TUBE_DEFAULTS)), light: pick(light(), Object.keys(LIGHT_DEFAULTS)), wall: pick(wall(), Object.keys(WALL_DEFAULTS)), depth: pick(depth(), Object.keys(DEPTH_DEFAULTS)), shape: pick(shape(), Object.keys(SHAPE_DEFAULTS)), ...(industrial() ? { industrial: industrial() } : {}) }, null, 0);
   }
   function pick(o, keys) { const r = {}; for (const k of keys) if (o[k] != null) r[k] = +(+o[k]).toFixed(3); return r; }
   function syncAll() { sliders.forEach(s => s._sync && s._sync()); syncReadout(); }
@@ -192,7 +208,14 @@
     sliders.push(buildSlider(body, crt, 'over', 1, 1.4, 0.01));    // output overscan — ≥1.11 pulls the corners back inside the warp's domain so they stop filling black
     sliders.push(buildSlider(body, crt, 'dust', 0, 1, 0.05));      // dust motes drifting in the light pools
     sliders.push(buildSlider(body, crt, 'aberr', 0, 1, 0.05));     // chromatic aberration at the bowed edges (GPU path)
-    sliders.push(buildSlider(body, crt, 'grain', 0, 0.25, 0.01));  // film grain over the warped feed
+    sliders.push(buildSlider(body, crt, 'grain', 0, 0.65, 0.01));  // film grain over the warped feed
+    sliders.push(buildSlider(body, crt, 'bloom', 0, 1, 0.05));     // phosphor bloom — the bright things haze outward (world.js drawBloom)
+    sliders.push(buildSlider(body, crt, 'sharpen', 0, .6, .02)); // bounded edge detail before the CRT grain
+    sliders.push(buildSlider(body, crt, 'film', 0, .5, .01)); // density curve; no lifted blacks or blur
+    sliders.push(buildSlider(body, crt, 'mask', 0, 0.6, 0.02));    // RGB aperture-grille mask over the feed
+    sliders.push(buildSlider(body, crt, 'bleed', 0, 0.6, 0.02));   // horizontal colour bleed (beam spread)
+    sliders.push(buildSlider(body, crt, 'roll', 0, 0.5, 0.02));    // the faint rolling sync bar
+    sliders.push(buildSlider(body, crt, 'emit', 0, 2, 0.05));      // prop light sources — screens/cores/lamps put colour on the deck (drawPropLights)
 
     // The glass aperture — how much of the panel the picture actually gets to use. Independent of `curve`
     // above: raising `clear` gives back real estate without touching the bulge at all.
@@ -222,6 +245,11 @@
     sliders.push(buildSlider(body, light, 'floor', 0, 0.5, 0.01, scheduleRebake));
     sliders.push(buildSlider(body, light, 'room', 0.2, 0.8, 0.02, scheduleRebake));
     sliders.push(buildSlider(body, light, 'crown', 0, 0.8, 0.01, scheduleRebake));   // how far ambient gives way over a wall's lit top surface — 0 puts the crown back under the hull skirt
+    sliders.push(buildSlider(body, light, 'reach', 0.6, 1.8, 0.05, scheduleRebake));   // pool radius multiplier — the lever that moved the room most in the 09-02 measurement
+    sliders.push(buildSlider(body, light, 'falloff', 0, 1, 0.05, scheduleRebake));    // 0 = the old linear ramp, 1 = the physical h³/(h²+r²)^1.5 curve
+    sliders.push(buildSlider(body, light, 'cool', 0, 1, 0.05, scheduleRebake));       // how far the shadow plate travels from warm-black to cold blue
+    sliders.push(buildSlider(body, light, 'warm', 0, 0.3, 0.01, scheduleRebake));     // the tungsten film INSIDE each pool — the only knob that lands light ON entities
+    sliders.push(buildSlider(body, light, 'spill', 0, 1, 0.05, scheduleRebake));      // starlight through viewport panes (needs a room clad in 'viewport')
     sliders.push(buildSlider(body, light, 'pitch', 3, 14, 1, scheduleRebake));       // tiles between ceiling lamps, BOTH axes. Row/column counts are ROUNDED tile divisions, so this steps: several adjacent values render identically on a given room and then the grid drops a whole rank. Low = an evenly lit warehouse, high = isolated pools over raw ambient
 
     section(body, 'CORNER PROFILE (re-bakes)');
@@ -233,7 +261,13 @@
     sliders.push(buildSlider(body, wall, 'skirt', 6, 44, 1, scheduleRebake));   // hull drop below the station
     sliders.push(buildSlider(body, wall, 'side', 4, 7, 1, scheduleRebake));     // e/w wall band width — 7 is the hull's own reach (`pad`); past it the wall juts out of the station silhouette
     sliders.push(buildSlider(body, wall, 'sideCap', 2, 6, 1, scheduleRebake));  // lit top surface of the e/w/s walls — the crown ring's width
+    sliders.push(buildSlider(body, wall, 'hullLit', 0.1, 1, 0.01, scheduleRebake));   // exterior exposure at the DECK LINE — the plate ring and the top of the skirt, where the room's light spills over the crown
+    sliders.push(buildSlider(body, wall, 'hullVoid', 0, 0.8, 0.01, scheduleRebake));  // exterior exposure at the skirt's FOOT — starlight only; the skirt fades between the two
 
+    if (industrial()) {
+      section(body, 'INDUSTRIAL MATERIAL LIGHT');
+      sliders.push(buildSlider(body, industrial, 'fixtureTint', 0, .3, .01, scheduleRebake));
+    }
     section(body, 'PRESETS');
     const presetWrap = document.createElement('div');
     presetWrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';

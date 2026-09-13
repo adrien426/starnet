@@ -156,6 +156,52 @@ function makeGeo() {
   };
 }
 
+// World II's architectural shade is a single coverage field, so adding the
+// perpendicular wall cannot multiply several independent bands into black.
+const shadeGeo = makeGeo(), shadeBefore = shadeGeo.zoneGrid.slice();
+const shadeOptions = { edgeAO: 1, wallShadow: .5, cornerAO: .55, southFoot: 0, wallUp: 30, corUp: 30 };
+const shadeEdge = (x, y, side, extra = {}) => ({ x, y, side, z: 'r1', room: true, ...extra });
+const shadeEdges = [shadeEdge(31, 2, 'n'), shadeEdge(32, 2, 'n'), shadeEdge(33, 2, 'n'),
+  shadeEdge(31, 2, 'w'), shadeEdge(33, 2, 'e')];
+const shadeViewport = { x: 360, y: 20, w: 60, h: 44 };
+const shade = (edges = shadeEdges, v = shadeViewport, opts = shadeOptions, g = shadeGeo) =>
+  StationBake.wallFloorShadow(g, edges, v, opts);
+const coverageAt = (field, x, y) => field.alpha[(y - field.y) * field.width + x - field.x];
+const combinedShade = shade();
+A.ok(combinedShade.alpha.some(a => a > 0), 'wall floor shade keeps real contact depth');
+A.ok(Math.max(...combinedShade.alpha) <= 70, 'default corner coverage stays below 28 percent before the spatial light map');
+A.eq(shade(shadeEdges.concat(shadeEdges)).alpha, combinedShade.alpha, 'duplicate wall feet do not multiply coverage');
+A.eq(shade(shadeEdges.slice().reverse()).alpha, combinedShade.alpha, 'wall ordering does not change corner coverage');
+const stressedShade = shade(shadeEdges, shadeViewport, { ...shadeOptions, edgeAO: 100, wallShadow: 100, cornerAO: 100 });
+A.ok(Math.max(...stressedShade.alpha) <= 87, 'extreme depth controls still cannot exceed the architectural coverage cap');
+const northOnly = shade([shadeEdge(32, 2, 'n')]);
+const northProfile = Array.from({ length: 17 }, (_, y) => coverageAt(northOnly, 390, 33 + y));
+A.ok(northProfile.every((a, i) => !i || a <= northProfile[i - 1]), 'north cast shade fades monotonically toward the deck');
+A.ok(new Set(northProfile.filter(a => a > 0)).size > 8, 'north falloff resolves more than eight native pixel levels instead of four flat bands');
+A.ok(northProfile.every((a, i) => !i || northProfile[i - 1] - a <= 8), 'adjacent falloff rows avoid abrupt broad band steps');
+A.eq(northProfile.slice(14), [0, 0, 0], 'wall cast falloff ends cleanly at its shortened reach');
+for (const v of [{ x: 379, y: 27, w: 39, h: 23 }, { x: 384, y: 33, w: 24, h: 17 }]) {
+  const cropped = shade(shadeEdges, v);
+  A.ok(cropped.alpha.every((a, i) => a === coverageAt(combinedShade, v.x + i % v.w, v.y + Math.floor(i / v.w))),
+    'native shadow falloff is an exact crop across tile and 384px chunk boundaries at ' + v.x);
+}
+A.ok(shade(shadeEdges, shadeViewport, { ...shadeOptions, edgeAO: 0, wallShadow: 0, cornerAO: 0 }).alpha.every(a => a === 0),
+  'turning off architectural depth controls leaves the floor untouched');
+for (const excluded of [{ door: true }, { open: true }])
+  A.ok(shade(shadeEdges.map(e => ({ ...e, ...excluded }))).alpha.every(a => a === 0), 'openings never acquire invented wall shade');
+const roomBoundary = makeGeo();
+for (let x = 31; x <= 33; x++) roomBoundary.zoneGrid[roomBoundary.idx(x, 3)] = x === 32 ? null : 'other-room';
+const clippedShade = shade(shadeEdges, shadeViewport, shadeOptions, roomBoundary);
+A.ok(Array.from({ length: 36 * 12 }, (_, i) => coverageAt(clippedShade, 372 + i % 36, 36 + Math.floor(i / 36))).every(a => a === 0),
+  'falloff cannot enter void or another room even when the wall reaches beyond its tile');
+const shiftedShadeGeo = { ...shadeGeo, origin: { tx: -4, ty: -6 }, zoneGrid: Array(shadeGeo.zoneGrid.length).fill(null) };
+for (let y = 0; y < shadeGeo.ROWS - 6; y++) for (let x = 0; x < shadeGeo.COLS - 4; x++)
+  shiftedShadeGeo.zoneGrid[shiftedShadeGeo.idx(x + 4, y + 6)] = shadeGeo.zoneGrid[shadeGeo.idx(x, y)];
+A.eq(shade(shadeEdges.map(e => ({ ...e, x: e.x + 4, y: e.y + 6 })),
+  { ...shadeViewport, x: shadeViewport.x + 48, y: shadeViewport.y + 72 }, shadeOptions, shiftedShadeGeo).alpha,
+  combinedShade.alpha, 'signed-origin frame growth preserves physical shadow coverage');
+A.eq(shadeGeo.zoneGrid, shadeBefore, 'shadow coverage cannot mutate geometry or its zone ownership');
+
 // a chunk bake may allocate intermediates up to one skirt-margin taller than the chunk
 // (the hull extrusion's silhouette canvases carry WALL.skirt+4 of vertical margin on each
 // side so a footprint ending just outside the viewport still drops its skirt into it) —
@@ -253,10 +299,51 @@ A.ok(canvases.every(boundedCanvas),
    this file's canvas mock resolves a gradient fillStyle to a single value, so the room-lighting
    pass flattens the whole footprint and every floor mark under it becomes invisible. */
 const matGeo = mat => { const g = makeGeo(); g.matOf = () => mat; return g; };
-for (const mat of ['grate', 'hex', 'plank', 'turf']) {
+for (const mat of ['grate', 'hex', 'plank', 'turf', 'alloy']) {
   const g = matGeo(mat);
   A.eq(pixelDiff(composeLayer(StationBake.bakeIncremental(g, null, null), 'base'), StationBake.bake(g).baseCv), 0,
     mat + ' deck bakes identically chunked and monolithic');
 }
 
+// Regression: growing either room axis must add distributed, weaker fixtures.
+// Actual coverage is checked by dev/room-lighting-even-proof.mjs; this canvas
+// mock cannot represent gradients.
+for (const [w, h] of [[9, 7], [14, 9], [15, 14], [18, 18], [24, 16], [12, 24], [40, 30]]) {
+  const g = makeGeo(), r = { z: 'r1', x1: 2, y1: 2, x2: w + 1, y2: h + 1 };
+  g.allRects = [r]; g.zones.r1 = r; g.zoneGrid.fill(null);
+  for (let y = r.y1; y <= r.y2; y++) for (let x = r.x1; x <= r.x2; x++) g.zoneGrid[g.idx(x, y)] = 'r1';
+  const lamps = StationBake.bake(g).lamps;
+  const cols = Math.ceil(w / 8), rows = Math.ceil(h / 8);
+  A.eq(lamps.length, cols * rows, w + 'x' + h + ' distributes fixtures on both axes');
+  A.eq(new Set(lamps.map(l => l.x)).size, cols, w + 'x' + h + ' covers the full width');
+  A.eq(new Set(lamps.map(l => l.y)).size, rows, w + 'x' + h + ' covers the full height');
+  A.ok(lamps.every(l => l.gain > 0 && l.gain <= .25), w + 'x' + h + ' keeps fixture accents below the diffuse fill');
+
+}
+
+// Raised corner faces are part of the interior, including the portion above
+// the footprint. The receiver must follow both corner shapes without lighting
+// the crown or the void above it.
+const savedUp = StationBake.WALL.up, savedN = StationBake.SHAPE.cornerN;
+for (const n of [1, 2]) {
+  StationBake.SHAPE.cornerN = n;
+  const g = makeGeo(), r = {z:'r1',x1:4,y1:6,x2:18,y2:17};
+  g.allRects=[r];g.zones.r1=r;g.zoneGrid.fill(null);
+  for(let y=r.y1;y<=r.y2;y++)for(let x=r.x1;x<=r.x2;x++)g.zoneGrid[g.idx(x,y)]='r1';
+  g.chamfers=[[r.x1,r.y1,'tl'],[r.x2,r.y1,'tr'],[r.x1,r.y2,'bl'],[r.x2,r.y2,'br']];
+  for(const up of [14,30,50]) {
+    StationBake.WALL.up=up;
+    const b=StationBake.bake(g),mask=b.interiorCv;
+    const y=r.y1*12-Math.min(10,up-10); // below the crown even on the shallow 14px wall
+    for(const x of [r.x1*12+6,(r.x2+1)*12-6]) {
+      A.ok(mask._pixels[y*mask.width+x]!==0,'corner '+n+' height '+up+' raised face receives light at '+x);
+      A.eq(mask._pixels[(r.y1*12-up-10)*mask.width+x],0,'corner '+n+' height '+up+' leaves sky outside the receiver');
+    }
+    if(up===30) {
+      const chunks=StationBake.bakeIncremental(g,null,null);
+      A.eq(pixelDiff(composeLayer(chunks,'light'),b.lightCv),0,'corner '+n+' raised wall lighting matches across chunk and full bake');
+    }
+  }
+}
+StationBake.WALL.up=savedUp;StationBake.SHAPE.cornerN=savedN;
 A.report('stationbake.chunk');

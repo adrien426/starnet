@@ -163,13 +163,13 @@ const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
   A.ok(C.list().length >= 30, 'catalog now carries a substantial verified set (30+)');
 }
 
-// ---- J. OAuth-audit retiers (2026-07-18): GitHub is a PAT connector; url-less oauth entries carry `via` ----
+// ---- J. Registered GitHub device sign-in; url-less oauth entries carry `via` ----
 {
-  // github.com/login/oauth has NO dynamic client registration (live-probed), so an oauth tier could never
-  // complete a sign-in — the honest tier is apikey (PAT as bearer, GitHub's documented remote-server path).
+  // GitHub has no dynamic registration; StarNet now supplies its own public device client.
   const gh = C.get('github');
-  A.eq(gh.authType, 'apikey', 'github is a paste-a-key (PAT) connector — its AS has no dynamic registration');
-  A.eq(gh.installable, true, 'github is installable today');
+  A.eq(gh.authType, 'oauth', 'github uses registered device sign-in');
+  A.eq(gh.deviceFlow, true, 'github bypasses dynamic registration with its device client');
+  A.eq(gh.installable, false, 'github is installed by sign-in rather than unauthenticated direct install');
   A.ok(!('token' in (C.installConfig('github') || {})), 'github installConfig carries no token');
   // `via` honesty: only url-less oauth entries carry it, and it must point at a REAL installable catalog
   // entry — otherwise the "VIA <name>" jump would land nowhere (a dead click with extra steps).
@@ -192,21 +192,21 @@ const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
     const e = C.get(id);
     A.ok(e, id + ' is in the catalog');
     A.eq(e.authType, 'oauth', id + ' is an oauth connector');
-    A.ok(/^https:\/\/\w+mcp\.googleapis\.com\/mcp\/v1$/.test(e.url), id + ' rides Google\'s official MCP endpoint (' + e.url + ')');
+    A.eq(require('../sidecar/mcp/transport.google.js').ENDPOINTS[id], e.url, id + ' uses the stable Google API adapter');
     A.ok(!e.via, id + ' needs no aggregator detour');
     A.ok(e.staticOauth, id + ' carries staticOauth (Google has no dynamic client registration)');
     A.eq(e.staticOauth.authorizationServer, 'https://accounts.google.com', id + ' shares the ONE Google authorization server (client pasted once)');
     A.ok(/^https:\/\/accounts\.google\.com\//.test(e.staticOauth.authorizationEndpoint), id + ' authorize endpoint is Google\'s');
     A.eq(e.staticOauth.tokenEndpoint, 'https://oauth2.googleapis.com/token', id + ' token endpoint is Google\'s');
     A.ok(Array.isArray(e.staticOauth.scopes) && e.staticOauth.scopes.length >= 2, id + ' declares real scopes');
-    A.ok(e.staticOauth.scopes.every(s => /^https:\/\/www\.googleapis\.com\/auth\//.test(s)), id + ' scopes are googleapis auth scopes');
+    A.ok(e.staticOauth.scopes.every(s => s === 'openid' || /^https:\/\/www\.googleapis\.com\/auth\//.test(s)), id + ' scopes are Google API and identity scopes');
     // Google never issues a refresh token without these — a connector that dies in an hour is a lie.
     A.eq(e.staticOauth.extraAuthParams.access_type, 'offline', id + ' requests offline access (refresh token)');
-    A.eq(e.staticOauth.extraAuthParams.prompt, 'consent', id + ' forces the consent prompt (refresh token on re-grant)');
-    A.eq(e.staticOauth.clientSecretRequired, true, id + ' requires the Web application client secret Google issues');
-    A.eq(e.staticOauth.developerPreview, true, id + ' is honestly marked as Google Developer Preview');
-    A.ok(/^https:\/\/developers\.google\.com\/workspace\//.test(e.staticOauth.setupUrl), id + ' links the official complete setup guide');
-    A.ok(/enable the product API and MCP API/i.test(e.staticOauth.setupNote), id + ' states the required Google Cloud enablement step');
+    A.eq(e.staticOauth.extraAuthParams.prompt, 'consent select_account', id + ' asks which account and requests consent');
+    A.eq(e.staticOauth.clientSecretRequired, false, id + ' does not require a customer client secret');
+    A.eq(e.staticOauth.developerPreview, false, id + ' does not depend on Developer Preview');
+    A.ok(/^https:\/\/developers\.google\.com\/identity\//.test(e.staticOauth.setupUrl), id + ' links the official complete setup guide');
+    A.ok(/StarNet supplies the Google application registration/i.test(e.staticOauth.setupNote), id + ' states the required Google Cloud enablement step');
     A.eq(C.installConfig(id), null, id + ' is not one-click-upsert installable (sign-in flow owns it)');
     A.ok(e.aliases.indexOf('google') >= 0 && e.aliases.indexOf('google workspace') >= 0, id + ' is findable by the google names');
   }
@@ -214,7 +214,7 @@ const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
   const g1 = C.get('gmail'); g1.staticOauth.scopes.push('MUTATED'); g1.staticOauth.extraAuthParams.prompt = 'MUTATED';
   const g2 = C.get('gmail');
   A.ok(g2.staticOauth.scopes.indexOf('MUTATED') < 0, 'staticOauth.scopes is defensively cloned');
-  A.eq(g2.staticOauth.extraAuthParams.prompt, 'consent', 'staticOauth.extraAuthParams is defensively cloned');
+  A.eq(g2.staticOauth.extraAuthParams.prompt, 'consent select_account', 'staticOauth.extraAuthParams is defensively cloned');
   // entries WITHOUT staticOauth carry an explicit null (a stable shape the UI can branch on).
   A.eq(C.get('notion').staticOauth, null, 'a DCR oauth entry has staticOauth: null');
 }

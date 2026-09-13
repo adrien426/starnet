@@ -89,6 +89,8 @@
   const left = document.getElementById('left');
   const sumEl = document.getElementById('crew-sum');
   const vseam = document.getElementById('crew-vresizer');
+  const crewSearch = document.getElementById('crew-search-wrap');
+  const attention = document.getElementById('ws-attention');
 
   // The dragged row count, or null for "measure it for me". Stored as a ROW COUNT and not as a
   // height on purpose: rows change height (a WORKING row opens its in-flight bar) and the roster
@@ -100,7 +102,7 @@
   // the max-height that ends the list flush under each row in turn (border-box sizing, so the
   // list's own padding counts) — summed from REAL geometry every time, never from a row constant
   function rowCuts() {
-    const rows = ul.querySelectorAll('.crew-row');
+    const rows = ul.querySelectorAll('.crew-row:not([hidden])');
     if (!rows.length) return [];
     const cs = getComputedStyle(ul);
     const padBottom = parseFloat(cs.paddingBottom) || 0;
@@ -125,9 +127,12 @@
     // What the column can actually spare.
     const z = zoomOf();
     const sumH = sumEl ? sumEl.getBoundingClientRect().height : 0;
-    const spare = (left.getBoundingClientRect().bottom - ul.getBoundingClientRect().top - sumH) / z - WS_FLOOR;
+    const attentionH = attention ? attention.getBoundingClientRect().height : 0;
+    const spare = (left.getBoundingClientRect().bottom - ul.getBoundingClientRect().top - sumH - attentionH) / z - WS_FLOOR;
 
-    const cap = crewCap(cuts, { railH: left.clientHeight, spare: spare, rows: wantRows });
+    // Search temporarily opens a deliberately shut roster, then restores the saved split on close.
+    const searching = crewSearch && !crewSearch.hidden;
+    const cap = crewCap(cuts, { railH: left.clientHeight, spare: spare, rows: searching && wantRows === 0 ? null : wantRows });
     // A SHUT roster must measure zero, and `max-height: 0` alone does not get there: #crew's
     // 1px/3px padding (panelchrome §4) is outside the capped box, so the closed list still painted
     // a 4px phosphor sliver under the header. The class is what takes the padding with it.
@@ -147,8 +152,11 @@
     // rewrites every status line's textContent once a second, and a subtree childList observer
     // turns that into ~8 forced layouts a second for nothing.
     new MutationObserver(schedule).observe(ul, { childList: true });
+    for (const control of [crewSearch, attention]) {
+      if (control) new MutationObserver(schedule).observe(control, { attributeFilter: ['hidden'] });
+    }
     // ROW HEIGHT — crewTick toggles .working, which opens the in-flight bar inside the row.
-    new MutationObserver(schedule).observe(ul, { subtree: true, attributeFilter: ['class'] });
+    new MutationObserver(schedule).observe(ul, { subtree: true, attributeFilter: ['class', 'hidden'] });
     // …and that bar is TRANSITIONED (motion.css §17, --t-med 220ms), so the class toggle above
     // fires while the row is still the OLD height and ANY single re-measure after it samples the
     // animation mid-flight — measured: 13px of the next agent showing until something else

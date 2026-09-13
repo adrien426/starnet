@@ -77,7 +77,7 @@ const App = (() => {
         if (typeof Chat !== 'undefined' && Chat.status && !(Chat.isBusy && Chat.isBusy())) Chat.status('online');
         const pill = el('status-pill'); if (pill) { pill.textContent = 'ONLINE'; pill.className = ''; }
         const empty = document.querySelector('.cmsg-empty-line');
-        if (empty && agent) empty.textContent = 'COMMS online. Type a task or a question to ' + agent.name + '.';
+        if (empty && agent) empty.textContent = 'What would you like to work on?';
         return;
       }
       // EventSource.CONNECTING is not a fault. Only call the link unavailable after it has failed to
@@ -489,10 +489,14 @@ const App = (() => {
   // recompose THAT agent's live prompt (personality is prompt text — Personas.compose folds it in), and if the
   // agent is the focused one, hand the new prompt to the running chat and re-key Voice so the text voice changes
   // immediately. pushRoster ships the recomposed prompt to the sidecar (delegation + cron runs speak it too).
-  function setAgentPersona(agentId, personaId) {
+  function setAgentPersona(agentId, personaId, tuning) {
     const a = agents.get(String(agentId || '')) || (agent && agent.id === agentId ? agent : null);
     if (!a || typeof Personas === 'undefined' || !Personas.exists(personaId)) return false;
     a.personaId = Personas.resolve ? Personas.resolve(personaId) : personaId;
+    if (tuning && typeof tuning === 'object') {
+      a.voiceTraits = Object.assign({}, tuning.traits || {});
+      a.customVoice = typeof tuning.custom === 'string' ? tuning.custom.trim() : '';
+    }
     a.systemPrompt = composeSystemPrompt(a);
     if (agent && a.id === agent.id) {   // focused agent — the live COMMS session adopts the voice at once
       if (typeof Chat !== 'undefined' && Chat.setSystem) Chat.setSystem(a.systemPrompt);
@@ -871,7 +875,7 @@ const App = (() => {
       if (!s || !s.id || s.id === 'agent' || agents.has(s.id)) continue;   // hero already registered; skip dups (so the 'specialist' default below is always correct here — the orchestrator never routes through this path)
       const a = { id: s.id, name: s.name, color: s.color, skin: s.skin || DATA.DEFAULT_SKIN, model: s.model || (agent && agent.model),
                   provider: s.provider || (agent && agent.provider) || null, reasoningEffort: s.reasoningEffort || (agent && agent.reasoningEffort) || null,   // #4: per-agent provider+effort (fall back to the hero's)
-                  personaId: s.personaId, role: s.role || 'specialist', voiceTraits: s.voiceTraits || null, customVoice: s.customVoice || '',
+                  personaId: (typeof Personas !== 'undefined' ? Personas.resolve(s.personaId) : s.personaId), role: s.role || 'specialist', voiceTraits: s.voiceTraits || null, customVoice: s.customVoice || '',
                   approvalMode: s.approvalMode || 'ask', executionProfile: executionProfileOf(s), workshop: !!s.workshop, purpose: s.purpose || null, specialtyId: s.specialtyId || null,
                   skills: Array.isArray(s.skills) ? s.skills.slice() : [],   // Class Loadouts S1: restore the per-agent skill package
                   docs: s.docs, stats: (s.stats && typeof s.stats === 'object') ? s.stats : null, createdAt: s.createdAt || Date.now() };
@@ -1210,7 +1214,7 @@ const App = (() => {
   // purpose or specialtyId. Chat.send classifies it as a real task AND folds its interest tag into the profile, so
   // launching missions also sharpens future recommendations. Returns true once the run is kicked off, false on a
   // no-op (no agent / empty directive) so the bay can report success honestly. Mirrors newWorkstream() + the send.
-  function launchRecipe(recipe, values) {
+  function launchRecipe(recipe, values, source) {
     if (!agent || typeof Recipes === 'undefined' || !recipe) return false;
     const text = Recipes.fillTask(recipe, values || {});
     if (!text) return false;                                              // nothing to send → report the no-op honestly
@@ -1220,10 +1224,11 @@ const App = (() => {
     // so the bay says so, and leave the counters truthful.
     if (!(typeof Chat !== 'undefined' && Chat.send && !Chat.isBusy())) return false;
     const ws = (typeof Workstreams !== 'undefined') ? Workstreams.create(recipe.name || 'Mission', { kind: 'task' }) : null;   // a recipe mission is a board task
+    if (ws && source && source.root && Workstreams.setProjectRoot) Workstreams.setProjectRoot(ws.id, source.root);
     if (ws && Chat.load) Chat.load(ws);   // make the new stream the compose target before sending
     refreshUsage(); renderRail();
     // engagement loop (scout lane 5): count the REAL launch — feeds the FOR-YOU rank + the drafting hint.
-    try { if (typeof ProspectStore !== 'undefined' && ProspectStore.noteLaunch) ProspectStore.noteLaunch(recipe); } catch (_) {}
+    try { if (!(source && source.direct) && typeof ProspectStore !== 'undefined' && ProspectStore.noteLaunch) ProspectStore.noteLaunch(recipe); } catch (_) {}
     // fromRecipe marks this run as recipe-launched so R5 "Bottle a run" never offers to re-bottle a recipe (it
     // already IS one). chat.js records it into RUN_META at onRunId; BottleStore reads it via runBottleInfo below.
     // recipeId is the provenance SPINE: it rides RUN_META → the /api/run body → the durable run row, so the
@@ -1231,7 +1236,7 @@ const App = (() => {
     // SOP recipes: the recipe's typed acceptance rows (tokens filled) ride the run body as `postconditions` — the
     // host evaluates them when the run ends (sidecar/task-postconditions.js); null when the recipe declares none.
     const postconditions = Recipes.postconditionsFor ? Recipes.postconditionsFor(recipe, values || {}) : null;
-    Chat.send(text, { fromRecipe: true, recipeId: recipe.id, postconditions: postconditions || undefined });   // kicks off the run on the fresh stream
+    Chat.send(text, { fromRecipe: !(source && source.direct), recipeId: source && source.direct ? undefined : recipe.id, postconditions: postconditions || undefined });   // kicks off the run on the fresh stream
     persist();
     return true;
   }
@@ -1452,7 +1457,7 @@ const App = (() => {
     const worksignal = (typeof WorkSignalStore !== 'undefined') ? WorkSignalStore.serialize() : undefined;   // the capability-usage histogram (adaptive recruitment)
     const roster = liveAgents();
     const dossier = (typeof DossierStore !== 'undefined') ? DossierStore.serialize() : undefined;   // the station-wide Commander model
-    const doc = Save.write(Object.assign({ agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize()));
+    const doc = Save.write(Object.assign({ _saveDirty: true, _saveRevision: typeof CloudSave !== 'undefined' && CloudSave.revision ? CloudSave.revision() : 0, agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize()));
     if (doc && typeof CloudSave !== 'undefined') CloudSave.push(doc);   // durable write-through to the sidecar (debounced, best-effort)
     if (rosterPushFailed) pushRoster();   // a prior roster POST failed — retry it opportunistically on this persist
     if (typeof StationUI !== 'undefined') StationUI.flashSave();
@@ -1489,6 +1494,7 @@ const App = (() => {
     const countEl = el('model-count'), inp = el('in-model');
     el('model-hint').textContent = 'loading model catalog…';
     const list = await Harness.listModels(p);
+    if (p !== normalizeProviderId(pickedProvider)) return;
     // DEFAULT = the curated MODEL_PICKS[provider][0] — NOT the alphabetical regex hit the old code used (which
     // drifted onto stale slugs while the right answer sat one inch below in the picks). defaultModelFor() covers
     // providers without a curated pick (custom / ollama).
@@ -1664,7 +1670,7 @@ const App = (() => {
       b.className = 'mp-chip'; b.dataset.id = m.id; b.title = m.id;
       b.appendChild(document.createTextNode(m.label));
       if (m.tag) { const t = document.createElement('b'); t.textContent = ' · ' + m.tag; b.appendChild(t); }
-      b.onclick = () => { el('in-model').value = m.id; SFX.click(); updateHint(); };
+      b.onclick = () => { el('in-model').value = m.id; SFX.click(); updateHint(); window.OverseerSetup?.modelPicked(); };
       wrap.appendChild(b);
     });
     syncModelPicks();
@@ -1704,6 +1710,7 @@ const App = (() => {
   // opening downward, or flipping above when the field sits low in the console.
   function positionModelPop() {
     const pop = el('model-pop'), inp = el('in-model'); if (!pop || pop.hidden || !inp) return;
+    if (el('ov-model-dialog')?.open) return;
     // rect/innerHeight are visual px, style px on the fixed pop are body-zoomed (TEXT SIZE) — divide once.
     const z = U.uiZoom(), r0 = inp.getBoundingClientRect(), gap = 4, vh = window.innerHeight / z;
     const r = { left: r0.left / z, top: r0.top / z, bottom: r0.bottom / z, width: r0.width / z };
@@ -1733,7 +1740,7 @@ const App = (() => {
     if (modelPopReposition) { window.removeEventListener('scroll', modelPopReposition, true); window.removeEventListener('resize', modelPopReposition); modelPopReposition = null; }
   }
   function setModelPopIdx(i) { modelPopIdx = i; modelPopRows.forEach((r, k) => r.el.classList.toggle('hi', k === i)); const cur = modelPopRows[i]; if (cur) cur.el.scrollIntoView({ block: 'nearest' }); }
-  function pickModelFromPop(id) { const inp = el('in-model'); inp.value = id; closeModelPop(); SFX.click(); updateHint(); inp.focus(); }
+  function pickModelFromPop(id) { const inp = el('in-model'); inp.value = id; closeModelPop(); SFX.click(); updateHint(); if (window.OverseerSetup?.modelPicked()) return; inp.focus(); }
   function renderModelPop() {
     const pop = el('model-pop'); if (!pop) return;
     const cur = el('in-model').value.trim();   // the committed selection (drives the highlighted ✓ row)
@@ -1763,7 +1770,8 @@ const App = (() => {
       const meta = document.createElement('span'); meta.className = 'ov-mdl-meta'; meta.textContent = modelMetaStr(m.id);
       row.appendChild(name); row.appendChild(meta);
       const idx = modelPopRows.length;
-      row.addEventListener('mousedown', e => { e.preventDefault(); pickModelFromPop(m.id); });   // mousedown+preventDefault: the pick lands before the input blurs
+      row.addEventListener('mousedown', e => e.preventDefault());
+      row.addEventListener('click', () => pickModelFromPop(m.id));   // mousedown+preventDefault: the pick lands before the input blurs
       row.addEventListener('mousemove', () => setModelPopIdx(idx));
       frag.appendChild(row); modelPopRows.push({ id: m.id, el: row });
     }
@@ -1777,21 +1785,22 @@ const App = (() => {
     const inp = el('in-model'); if (!inp) return;
     inp.oninput = () => { modelPopQ = inp.value.trim(); openModelPop(); updateHint(); };
     inp.onfocus = () => { if (!inp.readOnly) { modelPopQ = ''; openModelPop(); } };   // fresh focus browses the whole catalog
-    inp.onblur = () => setTimeout(() => { if (document.activeElement !== inp) closeModelPop(); }, 130);
+    inp.onblur = () => setTimeout(() => { if (document.activeElement !== inp && !el('ov-model-dialog')?.open) closeModelPop(); }, 130);
     inp.onkeydown = e => {
       const open = !el('model-pop').hidden;
       if (e.key === 'ArrowDown') { if (!open) { modelPopQ = ''; openModelPop(); } else setModelPopIdx(Math.min(modelPopIdx + 1, modelPopRows.length - 1)); e.preventDefault(); return; }
       if (e.key === 'ArrowUp') { if (open) { setModelPopIdx(Math.max(modelPopIdx - 1, 0)); e.preventDefault(); } return; }
-      if (e.key === 'Escape') { if (open) { closeModelPop(); e.preventDefault(); e.stopPropagation(); } return; }   // Esc closes the popover ONLY (never the screen)
+      if (e.key === 'Escape') { if (el('ov-model-dialog')?.open) { window.OverseerSetup.cancelModel(); e.preventDefault(); e.stopPropagation(); return; } if (open) { closeModelPop(); e.preventDefault(); e.stopPropagation(); } return; }
       if (e.key === 'Enter' && !e.isComposing) {
         if (open && modelPopRows.length) { const pick = modelPopRows[modelPopIdx >= 0 ? modelPopIdx : 0]; if (pick) { pickModelFromPop(pick.id); e.preventDefault(); return; } }
-        e.preventDefault(); onWake();
+        e.preventDefault(); if (el('ov-model-dialog')?.open) { window.OverseerSetup.modelPicked(); return; } onWake();
       }
     };
   }
 
   function updateHint() {
     const id = el('in-model').value.trim(), hint = el('model-hint');
+    window.OverseerSetup?.reflectModel(genesisModels.find(m => m.id === id) || { id, name: id }, pickedProvider === 'openai' && codexConnected && !el('in-key').value.trim() ? 'codex' : pickedProvider);
     syncModelPicks();   // keep the recommended-chip highlight in lockstep with whatever's in the field
     if (isOAuthProviderId(pickedProvider)) { hint.textContent = 'included in your ' + OAUTH_GENESIS[pickedProvider].sub.replace(/ subscription$/, '') + ' subscription'; return; }
     if (!id) { hint.textContent = 'pick or type a model slug'; return; }
@@ -1905,6 +1914,7 @@ const App = (() => {
       loadModels(pickedProvider);
     }
     buildModelPicks();        // recommended chips (OpenRouter only; clears itself on the codex path)
+    if (typeof OverseerSetup !== 'undefined') OverseerSetup.reflectProvider(pickedProvider);
   }
 
   // Populate the model datalist with EXACTLY the slugs the connected account's Codex backend accepts, so the
@@ -2147,10 +2157,11 @@ const App = (() => {
   function stopStarnetBalancePoll() { if (_starnetBalancePoll) { clearInterval(_starnetBalancePoll); _starnetBalancePoll = null; } }
   function starnetOutOfCredit() { return starnetLinked && typeof starnetBalanceUsd === 'number' && !(starnetBalanceUsd > 0); }
   let userPickedProvider = false;     // a real chip click — the auto-promote below must never override it
-  let _starnetLinkPoll = null, _starnetLinkPollBusy = false, _starnetLinkGeneration = 0, _starnetStatusSeq = 0;
+  let _starnetLinkPoll = null, _starnetLinkPollBusy = false, _starnetLinkStarting = false, _starnetLinkGeneration = 0, _starnetStatusSeq = 0;
   function stopStarnetLinkPoll() {
     _starnetLinkGeneration++;
     _starnetLinkPollBusy = false;
+    _starnetLinkStarting = false;
     if (_starnetLinkPoll) { clearInterval(_starnetLinkPoll); _starnetLinkPoll = null; }
   }
   async function revealStarnetGenesis(autoPick) {
@@ -2261,11 +2272,16 @@ const App = (() => {
   // Mint a pairing code, open the browser to confirm it, poll until linked. The device token never enters
   // this WebView: the sidecar holds it, and on desktop Rust immediately moves it into the OS keychain.
   function startStarnetLink() {
+    if (_starnetLinkStarting) return;
     SFX.click();
     stopStarnetLinkPoll();
+    _starnetLinkStarting = true;
+    _starnetStatusSeq++; // an older status read cannot replace the active connection message
     const generation = _starnetLinkGeneration;
     const statusEl = el('starnet-status'), codeEl = el('starnet-code'), openBtn = el('btn-starnet-open');
-    const fail = t => { statusEl.textContent = t; statusEl.className = 'codex-status bad'; codeEl.classList.add('hidden'); openBtn.classList.add('hidden'); };
+    const progress = el('connect-msg');
+    if (progress) { progress.className = 'msg'; progress.textContent = 'Opening your StarNet account…'; }
+    const fail = t => { statusEl.textContent = t; statusEl.className = 'codex-status bad'; codeEl.classList.add('hidden'); openBtn.classList.add('hidden'); if (progress) { progress.className = 'msg bad'; progress.textContent = t; } };
     statusEl.textContent = 'requesting a link code…'; statusEl.className = 'codex-status';
     Harness.api.post('/api/credits/link/start', { deviceName: 'StarNet Station' })
       .then(r => { if (generation !== _starnetLinkGeneration) return null; if (!r || !r.ok) throw new Error('start failed'); return r.j; })
@@ -2273,6 +2289,7 @@ const App = (() => {
         if (generation !== _starnetLinkGeneration) return;
         if (!j || !j.code) throw new Error('no code');
         codeEl.textContent = j.code; codeEl.classList.remove('hidden');
+        if (progress) progress.textContent = 'Confirm the code in your browser to connect.';
         openBtn.classList.remove('hidden');
         openBtn.onclick = () => openExternalUrl(j.verifyUrl);
         statusEl.textContent = 'confirm this code in your browser (opening the link page now)…';
@@ -2288,6 +2305,7 @@ const App = (() => {
               if (generation !== _starnetLinkGeneration) return;
               if (p && p.linked) {
                 stopStarnetLinkPoll(); SFX.open();
+                if (progress) progress.textContent = 'StarNet connected.';
                 codeEl.classList.add('hidden'); openBtn.classList.add('hidden');
                 // desktop: move the fresh token file → OS keychain NOW (Rust reads + moves; the token
                 // never passes through here), then teach Harness the credential exists so
@@ -2314,7 +2332,8 @@ const App = (() => {
         };
         _starnetLinkPoll = setInterval(tick, 2000);
       })
-      .catch(() => { if (generation === _starnetLinkGeneration) fail('could not reach the link service — try again'); });
+      .catch(() => { if (generation === _starnetLinkGeneration) fail('could not reach the link service — try again'); })
+      .finally(() => { if (generation === _starnetLinkGeneration) _starnetLinkStarting = false; });
   }
 
   // the SKIN picker: choose which sprite set (teddy bear, pepe, …) the new agent wears. The chosen
@@ -2369,8 +2388,11 @@ const App = (() => {
     if (!Personas.exists(pickedPersona)) pickedPersona = Personas.DEFAULT_ID;
     pickedPersona = Personas.resolve(pickedPersona);   // collapse any legacy id to its grounded archetype
     wrap.innerHTML = '';
+    const personalityHelp = el('ov-personality-help');
+    const helpText = 'Fine-tune later in your Overseer’s settings.';
+    if (personalityHelp) personalityHelp.textContent = helpText;
     let armedChip = null;   // the UNHINGED chip while it awaits its second press (house two-press confirm)
-    const disarm = () => { if (armedChip) { armedChip.textContent = armedChip.dataset.name; armedChip.classList.remove('arm'); armedChip = null; } };
+    const disarm = () => { if (personalityHelp) personalityHelp.textContent = helpText; if (armedChip) { armedChip.textContent = armedChip.dataset.name; armedChip.classList.remove('arm'); armedChip = null; } };
     Personas.list().forEach(p => {
       const chip = document.createElement('button');
       chip.type = 'button';
@@ -2379,14 +2401,16 @@ const App = (() => {
       chip.textContent = p.name;
       chip.dataset.name = p.name;
       chip.setAttribute('aria-pressed', String(p.id === pickedPersona));
+      if (personalityHelp) chip.setAttribute('aria-describedby', 'ov-personality-help');
       chip.onclick = () => {
         // UNHINGED curses for real, so its chip arms first (same two-press pattern as the delete buttons):
         // press one names what it means, press two selects. Once confirmed, it's a normal chip this screen.
-        if (p.id === 'unhinged' && pickedPersona !== 'unhinged' && !unhingedConfirmed && armedChip !== chip) {
+        if (p.id === 'unhinged' && Personas.effective(p.id, pickedTraits).profanity > 0 && pickedPersona !== 'unhinged' && !unhingedConfirmed && armedChip !== chip) {
           disarm();
           armedChip = chip;
           chip.classList.add('arm');
-          chip.textContent = 'UNHINGED — SURE? it swears, for real';
+          if (personalityHelp) personalityHelp.textContent = 'Uses profanity. Select Unhinged again to confirm.';
+          else chip.textContent = 'UNHINGED — SURE? it swears, for real';
           SFX.click();
           return;
         }
@@ -2485,7 +2509,16 @@ const App = (() => {
     // Clear the model on a real USER switch so the new provider's curated default (MODEL_PICKS[p][0]) fills
     // instead of carrying a cross-provider slug (e.g. codex 'gpt-5.5' bleeding onto OpenRouter, which needs
     // 'openai/gpt-5.5'). The programmatic call below (resume) keeps the saved model — it never routes here.
-    document.querySelectorAll('.provider-row .prov').forEach(b => { b.onclick = () => { SFX.click(); userPickedProvider = true; if (b.dataset.prov !== pickedProvider) el('in-model').value = ''; selectProviderUI(b.dataset.prov); }; });
+    document.querySelectorAll('.provider-row .prov').forEach(b => { b.onclick = () => {
+      if (b.dataset.prov === 'starnet' && _starnetLinkStarting) return;
+      SFX.click(); userPickedProvider = true;
+      if (b.dataset.prov !== pickedProvider) el('in-model').value = '';
+      selectProviderUI(b.dataset.prov);
+      window.OverseerSetup?.beginConnection();
+      // The explicit StarNet card click starts account connection; automatic selection never opens a window.
+      if (b.dataset.prov === 'starnet' && !starnetLinked) startStarnetLink();
+
+    }; });
     // the long-tail providers start folded behind ＋ MORE so a first-run user faces 6 chips, not 15.
     // selectProviderUI() unfolds the row itself whenever the active provider lives in the tail.
     const provRow = document.querySelector('.provider-row'), provMore = el('prov-more');
@@ -2514,6 +2547,7 @@ const App = (() => {
     // RESUME/recovery honours the agent's saved provider; a FRESH create screen leads with the beginner-first
     // default (pickedProvider = 'codex' — sign in with ChatGPT, no API key), the top of the zero-to-value funnel.
     selectProviderUI(recovery ? Harness.getProv() : pickedProvider);
+    if (typeof OverseerSetup !== 'undefined') OverseerSetup.init(recovery, { refreshModel: updateHint, closeModel: closeModelPop });
     // INITIAL FOCUS: fresh create → the name field (the natural first action); RESUME → the credential control the
     // Commander must act on (the ChatGPT sign-in button on the keyless Codex path, else the key box). NEVER the
     // model field (focusing it springs the popover open) and never the phosphor swatches (the old Tab-start bug).
@@ -2564,8 +2598,8 @@ const App = (() => {
       const nameIn = el('in-name'); if (nameIn) { nameIn.readOnly = true; nameIn.tabIndex = -1; }
     } else {
       if (banner) { banner.classList.add('hidden'); banner.innerHTML = ''; }
-      if (title) title.textContent = '▮ CREATE YOUR OVERSEER';
-      if (sub) sub.innerHTML = 'the first mind you wake is your <b>OVERSEER</b> — it runs the station and recruits every agent after it.';
+      if (title) title.textContent = 'Create your Overseer';
+      if (sub) sub.textContent = 'One mind to run your station. Build your crew from here.';
       if (mode) mode.textContent = 'GENESIS';
       if (wake) wake.textContent = '⏼ WAKE OVERSEER ▸';
       locked.forEach(id => { const n = el(id); if (n) { n.classList.remove('field-locked'); n.removeAttribute('aria-disabled'); } });
@@ -2795,6 +2829,7 @@ const App = (() => {
     Workstreams.reset();   // a fresh General stream for the new agent
     if (typeof Tutorial !== 'undefined' && Tutorial.reset) Tutorial.reset();   // a NEW Commander re-earns the one-shot tour + FIRST STEPS state (own key)
     if (typeof PitchStore !== 'undefined') PitchStore.reset();   // a brand-new hero re-earns its First Pitch (own key)
+    if (typeof StarterStore !== 'undefined') StarterStore.reset();
     if (typeof SuggestStore !== 'undefined') SuggestStore.reset();   // …and a fresh ongoing-suggestion cadence
     if (typeof SeedStore !== 'undefined') SeedStore.reset();   // …and a fresh seed-offer budget
     if (typeof LaunchMemory !== 'undefined') LaunchMemory.reset();   // …and no inherited last-used recipe inputs (own key)
@@ -2836,7 +2871,10 @@ const App = (() => {
   /* ---------- resume ---------- */
   function resumeInto(saved) {
     agent = saved.agent;
-    if (!(Number(agent.createdAt) > 0)) agent.createdAt = Math.max(1, Number(saved.updatedAt) || Date.now());
+    // A legacy hero without createdAt already belongs to growth epoch 1 on the sidecar.
+    // Resuming is not founding a new station: inventing a timestamp here rejects every crew rating
+    // until the debounced save lands, and can strand existing epoch-1 feedback on another generation.
+    // Keep the missing date unknown. Only onWake creates a new Commander identity.
     if (!agent.role) agent.role = 'orchestrator';  // older hero saves predate the role field — the first agent is the lead
     agentDocs(agent);                              // seed config docs for older saves that predate them
     stripLegacyVoiceBlock(agent);                  // one-time: drop the old awakening's inline VOICE & MANNER so it doesn't double up with the archetype layer
@@ -2908,7 +2946,7 @@ const App = (() => {
     // at create AND backfills it on migrate — a stamp that is never SAVED would re-roll on every reload,
     // and every per-station REFIT latch keyed on it would be lost. Read before deserialize mutates it.)
     const hadStationId = !!(pendingStationDoc && pendingStationDoc.meta && pendingStationDoc.meta.createdAt);
-    station = (pendingStationDoc && pendingStationDoc.rooms) ? WorldModel.deserialize(pendingStationDoc) : WorldModel.create();
+    station = (pendingStationDoc && pendingStationDoc.rooms) ? WorldModel.deserialize(pendingStationDoc) : WorldModel.create(WorldModel.starterDoc());
     pendingStationDoc = null;
     // THE OVERSEER'S DESK IS A REAL PROP: materialize the starter workstation the world used to merely
     // DRAW (synthetic auto-desk) as a real hero-assigned desk in the doc, BEFORE the world derives its
@@ -3404,7 +3442,7 @@ const App = (() => {
       onReturn: () => { try { if (typeof WorkshopStore !== 'undefined' && WorkshopStore.presentOnReturn) WorkshopStore.presentOnReturn(); } catch (_) {} }
     });
     if (typeof Voice !== 'undefined') Voice.init({ name: agent.name, personaId: agent.personaId, resumeCue: !opts.awaitingPurpose });   // mic + this agent's per-persona voice; offer hands-free resume except during the awakening
-    if (typeof ModelDock !== 'undefined') ModelDock.init({ apply: applyQuickModel });
+    if (typeof ModelDock !== 'undefined') ModelDock.init({ apply: applyQuickModel, identity: () => (agent && agent.id) || '' });
     syncChannels();   // if a Telegram bot auto-started from saved config, refresh it to THIS agent's live identity
     pushRoster();     // Stage 2: seed the sidecar with the live crew so the lead can delegate (no-op for a solo station)
     renderRail();
@@ -3472,6 +3510,38 @@ const App = (() => {
   let railTicker = 0;
   let railShowArchived = false;   // when true the rail also lists archived (put-away) sessions, dimmed
   let railFocusId = null;         // roving-tabindex cursor: one rail stop regardless of session count
+  let railAttentionOnly = false;
+  let railAttentionKey = '';
+  // Pending consent belongs to a session. Multiple sessions on one agent remain distinct;
+  // deleted/orphaned channels cannot contribute a count with nowhere to open.
+  function railPendingIds() {
+    return new Set(typeof Channels === 'undefined' ? [] : Channels.pendingIds().filter(id => Workstreams.get(id)));
+  }
+  function syncRailAttention(pending) {
+    railAttentionKey = [...pending].sort().join('\n');
+    if (!pending.size) railAttentionOnly = false;
+    const btn = el('ws-attention'); if (!btn) return;
+    const hide = !pending.size || railView !== 'sessions';
+    if (hide && document.activeElement === btn) el('ws-search')?.focus();
+    if (btn.hidden !== hide) btn.hidden = hide;
+    const pressed = String(railAttentionOnly);
+    if (btn.getAttribute('aria-pressed') !== pressed) btn.setAttribute('aria-pressed', pressed);
+    const label = 'Waiting for you · ' + pending.size + ' session' + (pending.size === 1 ? '' : 's') + ' waiting for your response. ' + (railAttentionOnly ? 'Show all sessions' : 'Show waiting sessions');
+    if (btn.getAttribute('aria-label') !== label) btn.setAttribute('aria-label', label);
+    const count = el('ws-attention-count'), clear = el('ws-attention-clear');
+    if (count && count.textContent !== String(pending.size)) count.textContent = pending.size;
+    if (clear) clear.hidden = !railAttentionOnly;
+  }
+  let railKind = 'all';
+  const railExpanded = new Set();
+  try {
+    const saved = JSON.parse(localStorage.getItem('skynet.session-view') || '{}');
+    if (['all', 'automated'].includes(saved.kind)) railKind = saved.kind;
+    if (Array.isArray(saved.expanded)) saved.expanded.slice(0, 200).forEach(k => { if (typeof k === 'string') railExpanded.add(k); });
+  } catch (_) {}
+  function saveRailView() {
+    try { localStorage.setItem('skynet.session-view', JSON.stringify({ kind: railKind, expanded: [...railExpanded].slice(-200) })); } catch (_) {}
+  }
   function railFmtElapsed(ms) {
     const s = Math.floor((ms < 0 ? 0 : ms) / 1000);
     if (s < 60) return s + 's';
@@ -3488,28 +3558,25 @@ const App = (() => {
     if (h < 24) return h + 'h';
     return Math.floor(h / 24) + 'd';
   }
-  // the live presentation of one row: the dot class (pulsing run / gold attention / idle lane color), the compact
-  // right-edge meta (elapsed while busy, relative stamp when idle), and the busy/attn flags + full status word for
-  // the hover tooltip. Pure read of Channels + the record — no mutation.
-  /* THE DOT ANSWERS EXACTLY ONE QUESTION: whose turn is this session on?
-       FLASHING      — live right now. Phosphor = the agent is working; GOLD = it is paused on YOU
-                       (an approval, which is the one state burning down a fail-closed deny timer).
-       STEADY BRIGHT — finished, and you have NOT seen the output yet. This is the "ready" state.
-       FADED         — you have seen everything here. Nothing is owed in either direction.
-     The dot used to encode the kanban LANE instead, which inverted the very glance it exists for: a
-     read 'active' session sat at --ph-bright with a glow while an UNREAD 'todo' session sat at
-     --ph-dim, so seen sessions looked louder than unseen ones. Lane moved to the row tooltip — the
-     task board is the surface that owns it, and for a 'chat' stream (most of the rail) lane is
-     inferred rather than chosen, so it was never a fact worth the loudest pixel in the row. */
+  // The session lamp reads only recorded activity and the session's own live channel.
+  // Approval/reply outrank working, then failure, unread and read. Connection latency is
+  // distinct from confirmed work, and elapsed excludes the Commander's approval pauses.
   function railRowState(w) {
-    if (typeof Channels !== 'undefined' && Channels.isBusy(w.id)) {
-      const status = Channels.statusOf(w.id);
-      const attn = /approval/.test(status);
-      const started = Channels.startedAtOf(w.id);
-      // EL-11: a pending consent gets an EXPLICIT marker on its own row (not just the dot recolor) — a
-      // background session's paused run must be findable at a glance before the sidecar's deny timer runs out.
-      return { dot: 'ws-dot ' + (attn ? 'needsyou' : 'working'), meta: attn ? '▣ NEEDS YOU' : (started ? railFmtElapsed(Date.now() - started) : '…'), busy: true, attn, status };
+    const pending = typeof Channels !== 'undefined' && Channels.pendingOf(w.id);
+    if (pending) {
+      const question = pending.tool === 'brief.ask';
+      return { dot: question ? 'ws-dot needsyou reply' : 'ws-dot needsyou approval', meta: question ? 'Reply needed' : 'Approval needed', busy: Channels.isBusy(w.id), attn: true, status: question ? 'waiting for your answer' : 'awaiting your approval' };
     }
+    if (typeof Channels !== 'undefined' && Channels.isBusy(w.id)) {
+      if (!Channels.runIdOf(w.id)) {
+        return { dot: 'ws-dot connecting', meta: 'Connecting', busy: true, attn: false, status: 'connecting to the model' };
+      }
+      const status = Channels.statusOf(w.id);
+      const started = Channels.startedAtOf(w.id);
+      return { dot: 'ws-dot working', meta: started ? railFmtElapsed(Channels.elapsedOf(w.id, Date.now())) : '…', busy: true, attn: false, status };
+    }
+    // A settled failure uses the crossed lamp; only a live approval/question earns the action row.
+    if (w.lastRunOk === false) return { dot: 'ws-dot failed', meta: railRelTime(w.lastActiveAt), busy: false, attn: false, status: 'last run failed — open to inspect' };
     // a DELIVERY session ('workshop-<runId>' — idle-built work) that hasn't been reviewed is a decision the
     // Commander owes, not just an unread chat: say REVIEW on the row itself (2026-07-15 UX audit — the ⚒ prefix
     // alone didn't distinguish "your agent made you something" from ordinary unread activity).
@@ -3521,8 +3588,8 @@ const App = (() => {
     // faded the instant you actually look at it — which is what makes a glance down the rail mean
     // something. The ⚒ REVIEW branch above keeps its own wording: a BUILD waiting is a different
     // errand from a reply waiting, even though both are "unseen".
-    if (Workstreams.unread(w)) return { dot: 'ws-dot unseen', meta: railRelTime(w.lastActiveAt), busy: false, attn: false, status: '' };
-    return { dot: 'ws-dot seen', meta: railRelTime(w.lastActiveAt), busy: false, attn: false, status: '' };
+    if (Workstreams.unread(w)) return { dot: 'ws-dot unseen', meta: railRelTime(w.lastActiveAt), busy: false, attn: false, status: 'unread activity' };
+    return { dot: 'ws-dot seen', meta: railRelTime(w.lastActiveAt), busy: false, attn: false, status: 'read' };
   }
   /* ---------- INBOX row extras (SESSION ROWS = inbox) ----------
      Both lines are rendered ALWAYS and hidden by CSS in COMPACT, so the setting is a pure repaint —
@@ -3532,18 +3599,37 @@ const App = (() => {
     const a = agents.get(w.agentId);                      // the live registry, same one the world reads
     return (a && a.name) ? a.name : (w.agentId || 'AGENT');
   }
-  // "<model> · <n> MSG". The model is the one the SIDECAR reported for this stream's last run
-  // (Workstreams.lastModel) — never the agent's current dropdown value, which would assert a model
-  // over a transcript other models may have written. Unmeasured reads '—', which is the honest answer.
+  // Compact excerpt of the latest visible turn; never an invented completion claim.
+  // Share search/export filtering so hidden tool/system chatter stays hidden.
   function railReceipt(w) {
-    const n = (Workstreams.visibleMessages ? Workstreams.visibleMessages(w) : []).length;
-    // the vendor prefix is dropped for the ROW only ('anthropic/claude-sonnet-4.5' → 'claude-sonnet-4.5'):
-    // a 232px rail cannot hold the full id, and a clipped id reads as a different model. The complete,
-    // unabbreviated id stays in the row's tooltip (railModelFull), so nothing is actually hidden.
-    const model = (w.lastModel || '').trim().split('/').pop();
-    return (model || '—') + ' · ' + n + ' MSG';
+    const messages = Workstreams.visibleMessages ? Workstreams.visibleMessages(w) : [];
+    const latest = messages.slice().reverse().find(m => m.content.trim());
+    if (!latest) return 'No messages yet';
+    const text = latest.content
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/(^|\n)\s{0,3}(?:#{1,6}\s+|[-*+]\s+|>\s*)/g, ' ')
+      .replace(/[*_\x60]/g, '')
+      .replace(/\s+/g, ' ').trim();
+    const sentence = text.match(/^.*?[.!?](?:\s|$)/);
+    const excerpt = sentence ? sentence[0].trim() : text;
+    const short = excerpt.length > 160 ? excerpt.slice(0, 157).trimEnd() + '…' : excerpt;
+    return (latest.role === 'user' ? 'You: ' : '') + short;
   }
   function railModelFull(w) { return (w.lastModel || '').trim(); }
+  function railRowLabel(w, st, project = false) {
+    const title = w.title || 'General', name = railAgentName(w);
+    return title + ' session' + (name === title ? '' : ', ' + name) + (st.status ? ', ' + st.status : '')
+      + (Workstreams.unread(w) && !st.dot.includes('unseen') ? ', unread activity' : '')
+      + (project ? '; Enter to open' : '; Enter to open; Shift+F10 for actions');
+  }
+  function railRowTip(w, st, project = false) {
+    const full = railModelFull(w);
+    return (w.title || 'General') + (w.archived ? ' · archived' : '') + (st.status ? ' · ' + st.status : '')
+      + (Workstreams.unread(w) && !st.dot.includes('unseen') ? ' · unread activity' : '')
+      + (w.kind === 'task' ? ' · board: ' + w.lane : '')
+      + (full ? ' · last run on ' + full : '')
+      + (project ? ' — open this session' : ' — Shift+F10 or right-click for actions');
+  }
   function rowClass(w, st, activeId) {
     return 'ws-row' + (w.id === activeId ? ' sel' : '') + (st.busy ? ' busy' : '') + (st.attn ? ' attn' : '')
       + (w.pinned ? ' pinned' : '') + (w.archived ? ' archived' : '')
@@ -3556,24 +3642,34 @@ const App = (() => {
     const oldFocus = document.activeElement && document.activeElement.closest ? document.activeElement.closest('.ws-row[data-id]') : null;
     const restoreFocus = !!(oldFocus && ul.contains(oldFocus));
     if (oldFocus && oldFocus.dataset.id) railFocusId = oldFocus.dataset.id;
-    const rows = Workstreams.list({ includeArchived: railShowArchived });
+    const pending = railPendingIds();
+    syncRailAttention(pending);
+    const allRows = Workstreams.list({ includeArchived: true }).filter(w =>
+      railAttentionOnly ? pending.has(w.id) : (!w.archived || railShowArchived || pending.has(w.id)));
+    const grouped = railAttentionOnly ? allRows.map(w => ({ type: 'session', w })) : Workstreams.railGroups(allRows, { view: railKind, activeId, expanded: [...railExpanded], urgent: allRows.filter(w => railRowState(w).busy || pending.has(w.id)).map(w => w.id) });
+    const headers = new Map();
+    const rows = grouped.flatMap(item => {
+      if (item.type === 'session') return [item.w];
+      headers.set(item.visible[0].id, item);
+      return item.visible;
+    });
+    const filters = el('ws-kind-filter');
+    if (filters) filters.hidden = railAttentionOnly;
+    if (filters) filters.querySelectorAll('[data-ws-kind]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.wsKind === railKind));
+      button.onclick = () => { railAttentionOnly = false; railKind = button.dataset.wsKind; saveRailView(); renderRail(); };
+    });
     if (!rows.some(w => w.id === railFocusId)) railFocusId = rows.some(w => w.id === activeId) ? activeId : (rows[0] && rows[0].id);
     ul.setAttribute('role', 'listbox');
     ul.setAttribute('aria-label', 'Sessions');
     ul.innerHTML = rows.map((w, index) => {
       const title = w.title || 'General';
       const st = railRowState(w);
-      const full = railModelFull(w);
-      const tip = title + (w.archived ? ' · archived' : '') + (st.busy ? ' · ' + st.status : '')
-        + (Workstreams.unread(w) ? ' · not seen yet' : '')
-        // LANE lives here now rather than in the dot. Only a board DIRECTIVE ('task') actually chose
-        // its lane; a plain chat's lane is inferred, so naming it on every row would dress a guess
-        // up as a decision. The board remains the surface that owns and edits this.
-        + (w.kind === 'task' ? ' · board: ' + w.lane : '')
-        + (full ? ' · last run on ' + full : '')   // the UNABBREVIATED id the row had to shorten
-        + ' — Shift+F10 or right-click for actions';
-      return '<li class="' + rowClass(w, st, activeId) + '" data-id="' + U.esc(w.id) + '" tabindex="' + (w.id === railFocusId ? '0' : '-1') + '" role="option" aria-selected="' + (w.id === activeId ? 'true' : 'false') + '" aria-posinset="' + (index + 1) + '" aria-setsize="' + rows.length + '" aria-label="' + U.esc(title + ' session' + (railAgentName(w) === title ? '' : ', ' + railAgentName(w)) + (Workstreams.unread(w) ? ', not seen yet' : '') + '; Enter to open; Shift+F10 for actions') + '" aria-keyshortcuts="Shift+F10" title="' + U.esc(tip) + '">' +
-        '<span class="' + st.dot + '"></span>' +
+      const group = headers.get(w.id);
+      const groupHead = group ? '<li class="ws-auto-group" role="presentation"><button type="button" data-ws-group="' + U.esc(group.key) + '" aria-expanded="' + railExpanded.has(group.key) + '"><span>' + U.esc(group.name) + '</span><small>' + U.esc(railAgentName(w)) + ' · ' + group.rows.length + ' run' + (group.rows.length === 1 ? '' : 's') + ' · ' + (railExpanded.has(group.key) ? 'collapse' : 'show history') + '</small></button></li>' : '';
+      const tip = railRowTip(w, st);
+      return groupHead + '<li class="' + rowClass(w, st, activeId) + '" data-id="' + U.esc(w.id) + '" tabindex="' + (w.id === railFocusId ? '0' : '-1') + '" role="option" aria-selected="' + (w.id === activeId ? 'true' : 'false') + '" aria-posinset="' + (index + 1) + '" aria-setsize="' + rows.length + '" aria-label="' + U.esc(railRowLabel(w, st)) + '" aria-keyshortcuts="Shift+F10" title="' + U.esc(tip) + '">' +
+        '<span class="' + st.dot + '" aria-hidden="true"></span>' +
         (w.pinned ? '<span class="ws-pin" aria-hidden="true">★</span>' : '') +
         '<span class="ws-agent" aria-hidden="true">' + U.esc(railAgentName(w)) + '</span>' +
         '<span class="ws-title">' + U.esc(title) + '</span>' +
@@ -3582,6 +3678,18 @@ const App = (() => {
         '<button class="ws-kebab" tabindex="-1" aria-label="session actions" title="session actions">⋯</button>' +
         '</li>';
     }).join('');
+    if (!rows.length && railKind === 'automated' && !railAttentionOnly) {
+      ul.innerHTML = '<li class="proj-empty" role="presentation"><span role="status">No automation sessions yet.</span></li>';
+    }
+    ul.querySelectorAll('[data-ws-group]').forEach(button => {
+      button.onclick = () => {
+        const key = button.dataset.wsGroup;
+        if (railExpanded.has(key)) railExpanded.delete(key); else railExpanded.add(key);
+        saveRailView();
+        renderRail();
+        Array.from(ul.querySelectorAll('[data-ws-group]')).find(b => b.dataset.wsGroup === key)?.focus();
+      };
+    });
     ul.querySelectorAll('.ws-row').forEach(li => {
       const id = li.dataset.id;
       li.onclick = () => switchWorkstream(id);
@@ -3631,18 +3739,27 @@ const App = (() => {
   function updateRailLive() {
     const ul = el('workstreams'); const game = el('screen-game');
     if (!ul || typeof Workstreams === 'undefined' || !game || !game.classList.contains('active')) { stopRailTicker(); return; }
+    const pending = railPendingIds();
+    if ([...pending].sort().join('\n') !== railAttentionKey) { renderRail(); return; }
     const activeId = Workstreams.activeId();
-    ul.querySelectorAll('.ws-row').forEach(li => {
+    document.querySelectorAll('#workstreams .ws-row,#projects .proj-sess-full').forEach(li => {
       if (li.querySelector('.ws-rename')) return;   // leave a row alone while its title is being edited in place
-      const w = Workstreams.get(li.dataset.id); if (!w) return;
+      const project = li.classList.contains('proj-sess-full');
+      const w = Workstreams.get(project ? li.dataset.ws : li.dataset.id); if (!w) return;
       const st = railRowState(w);
       const dot = li.querySelector('.ws-dot'); if (dot && dot.className !== st.dot) dot.className = st.dot;
       const meta = li.querySelector('.ws-meta'); if (meta && meta.textContent !== st.meta) meta.textContent = st.meta;
-      // the INBOX receipt ages like the rest of the row: a reply landing mid-run moves the count, and a
-      // model measured for the first time replaces the '—'. Change-detected, so a quiet rail touches no DOM.
+      // Refresh the latest visible message without rebuilding the row or disturbing focus/scroll.
       const rec = li.querySelector('.ws-receipt');
       if (rec) { const next = railReceipt(w); if (rec.textContent !== next) rec.textContent = next; }
-      const cls = rowClass(w, st, activeId); if (li.className !== cls) li.className = cls;
+      const cls = rowClass(w, st, activeId) + (project ? ' proj-sess-full' : ''); if (li.className !== cls) li.className = cls;
+      const label = railRowLabel(w, st, project); if (li.getAttribute('aria-label') !== label) li.setAttribute('aria-label', label);
+      // Tooltip adoption moves title into data-tip. Update whichever owns it so a live
+      // approval/resume/completion cannot leave the previous state on hover or focus.
+      const tip = railRowTip(w, st, project), tipAttr = li.hasAttribute('title') ? 'title' : 'data-tip';
+      if (li.getAttribute(tipAttr) !== tip) li.setAttribute(tipAttr, tip);
+      const card = el('station-tip');
+      if (card && !card.hidden && li.getAttribute('aria-describedby') === 'station-tip' && card.textContent !== tip) card.textContent = tip;
     });
   }
   function armRailTicker() { if (!railTicker) railTicker = setInterval(updateRailLive, 1000); }
@@ -3719,8 +3836,13 @@ const App = (() => {
   function wireRailSearch() {
     const q = el('ws-search'); if (!q || q.__wired) return;
     q.__wired = true;
-    q.oninput = renderSessionSearch;
+    q.oninput = () => { if (railAttentionOnly) { railAttentionOnly = false; renderRail(); } renderSessionSearch(); };
     q.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); q.value = ''; renderSessionSearch(); q.blur(); } };
+    const attention = el('ws-attention');
+    if (attention) attention.onclick = () => {
+      railAttentionOnly = !railAttentionOnly;
+      q.value = ''; renderSessionSearch(); renderRail(); SFX.click();
+    };
   }
   // COMMS AGENT SELECTOR: put the Commander on the line with agent <agentId>. Selecting an agent must never
   // silently rebind an existing conversation to a different agent (that would corrupt whose transcript it is);
@@ -3826,7 +3948,7 @@ const App = (() => {
     menu.querySelector('.ws-menu-item').focus();
     SFX.click();
   }
-  function wsMenuAction(act, id) {
+  async function wsMenuAction(act, id) {
     const w = Workstreams.get(id); if (!w) return;
     if (act === 'rename') { beginRenameRow(id); return; }
     if (act === 'pin') { Workstreams.pin(id, !w.pinned); SFX.click(); renderRail(); persist(); return; }
@@ -3835,6 +3957,9 @@ const App = (() => {
     if (act === 'archive') {
       const wasActive = (id === Workstreams.activeId());
       const nowArchived = !w.archived, label = w.title || 'General';
+      if (nowArchived && w.conversationMode === 'group' && typeof GroupChat !== 'undefined') {
+        try { await GroupChat.pause(id); } catch (e) { StationUI.notify(e.message, 'bad'); return; }
+      }
       if (!Workstreams.archive(id, nowArchived)) { SFX.bad(); return; }
       SFX.close();
       if (wasActive && Workstreams.activeId() !== id) loadActiveStream();   // archiving the OPEN stream falls back to General
@@ -3842,8 +3967,12 @@ const App = (() => {
       if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify((nowArchived ? 'archived ' : 'restored ') + '“' + label + '”', '', undefined, { transient: true });
     }
   }
-  function deleteWorkstream(id) {
+  function deleteWorkstream(id, groupDeleted) {
     const w = Workstreams.get(id); const label = w ? (w.title || 'General') : '';
+    if (w && w.conversationMode === 'group' && !groupDeleted && typeof GroupChat !== 'undefined') {
+      GroupChat.remove(id).then(() => deleteWorkstream(id, true)).catch(e => StationUI.notify(e.message, 'bad'));
+      return false;
+    }
     const agentId = w ? (w.agentId || 'agent') : 'agent';
     // Recheck after the destructive-confirmation click: a session may have started while its menu was open.
     if (w && typeof Channels !== 'undefined' && Channels.isBusy && Channels.isBusy(id)) {
@@ -3886,11 +4015,14 @@ const App = (() => {
     titleSpan.replaceWith(input);
     input.focus(); input.select();
     let done = false;
-    const finish = (save) => {
+    const finish = async (save) => {
       if (done) return; done = true;
       let changed = false;
       if (save) {
         const v = input.value.trim();
+        if (v && w.conversationMode === 'group' && typeof GroupChat !== 'undefined') {
+          try { await GroupChat.rename(id, v); } catch (e) { StationUI.notify(e.message, 'bad'); renderRail(); return; }
+        }
         if (v || id === Workstreams.generalId()) changed = Workstreams.rename(id, v);   // empty on a normal stream = cancel
       }
       if (changed) {
@@ -3913,6 +4045,7 @@ const App = (() => {
   function updateArchivedToggle() {
     const ul = el('workstreams'); if (!ul) return;
     const old = ul.querySelector('.ws-arch-row'); if (old) old.remove();
+    if (railAttentionOnly) return;
     let n = 0; for (const w of Workstreams.list({ includeArchived: true })) if (w.archived) n++;
     if (!n) { railShowArchived = false; return; }
     const li = document.createElement('li');
@@ -3970,6 +4103,7 @@ const App = (() => {
     view = (view === 'projects') ? 'projects' : 'sessions';
     if (view === railView) return;
     railView = view;
+    syncRailAttention(railPendingIds());
     SFX.click();
     const pan = (typeof Projects !== 'undefined') ? Projects.panels(view) : { sessionsList: view === 'sessions', projectsList: view === 'projects', newBtn: view === 'sessions', addBtn: view === 'projects' };
     const set = (id, show) => { const e = el(id); if (e) e.hidden = !show; };
@@ -4045,7 +4179,7 @@ const App = (() => {
       const tip = (r.blessed ? '' : 'REVOKED (trust withdrawn) — ') + 'click to open this project · right-click for actions';
       const sess = projSessionsOf(r.root);
       const extra = Math.max(0, sess.length - 3);
-      return '<li class="ws-row proj-row' + (r.blessed ? '' : ' proj-revoked') + '" data-root="' + U.esc(r.root) + '" tabindex="0" role="button" aria-label="' + U.esc(r.name + ' project' + (r.blessed ? '' : ', access revoked') + '; Enter to open; Shift+F10 for actions') + '" aria-keyshortcuts="Shift+F10" title="' + U.esc(tip) + '">' +
+      return '<li class="ws-row proj-row' + (r.blessed ? '' : ' proj-revoked') + '" data-root="' + U.esc(r.root) + '" tabindex="0" role="button" aria-label="' + U.esc(r.name + ' project' + (r.blessed ? '' : ', access revoked') + (st.status ? ', ' + st.status : '') + '; Enter to open; Shift+F10 for actions') + '" aria-keyshortcuts="Shift+F10" title="' + U.esc(tip) + '">' +
         '<span class="' + projDot(r) + '"></span>' +
         '<span class="proj-main">' +
           '<span class="proj-line">' +
@@ -4125,8 +4259,8 @@ const App = (() => {
         const w = byId[s.id];
         const st = w ? railRowState(w) : { dot: 'ws-dot', meta: s.rel, busy: false, attn: false };
         const cls = w ? rowClass(w, st, activeId) : ('ws-row' + (s.id === activeId ? ' sel' : ''));
-        return '<li class="' + cls + ' proj-sess-full" data-ws="' + U.esc(s.id) + '" tabindex="0" role="button" aria-label="' + U.esc(s.title + ' session; Enter to open') + '"' + (s.id === activeId ? ' aria-current="true"' : '') + ' title="' + U.esc(s.title + ' — open this session') + '">' +
-          '<span class="' + st.dot + '"></span>' +
+        return '<li class="' + cls + ' proj-sess-full" data-ws="' + U.esc(s.id) + '" tabindex="0" role="button" aria-label="' + U.esc(w ? railRowLabel(w, st, true) : s.title + ' session; Enter to open') + '"' + (s.id === activeId ? ' aria-current="true"' : '') + ' title="' + U.esc(w ? railRowTip(w, st, true) : s.title + ' — open this session') + '">' +
+          '<span class="' + st.dot + '" aria-hidden="true"></span>' +
           '<span class="ws-title">' + U.esc(s.title) + '</span>' +
           '<span class="ws-meta">' + U.esc(st.meta || s.rel) + '</span>' +
           '</li>';
@@ -5011,7 +5145,7 @@ const App = (() => {
   // (never an id in the UI) and keys its standing candidates against the focused hero.
   // currentAgent/agents/applyConfig (slash-plan): the slash-command suite reads/writes the live roster
   // and per-agent config (/agents, /model, /personality, …).
-  return { show, refreshUsage, persist, pushRoster, refreshRail: renderRail, openWorkstream, summonAgent, summonForRequest, crewCount: () => agents.size,
+  return { show, refreshUsage, persist, pushRoster, refreshRail: renderRail, openWorkstream, launchRecipe, summonAgent, summonForRequest, crewCount: () => agents.size,
     agentName: id => { const a = agents.get(id); return a ? (a.name || a.id) : null; },
     // WORK LINES: a downstream stage runs as ANOTHER agent, so the chat host needs THAT agent's composed
     // prompt — never the focused one's. Read-only; null for an id that is not on the live roster.

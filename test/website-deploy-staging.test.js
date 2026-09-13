@@ -20,6 +20,10 @@ A.ok(fs.existsSync(path.join(staged, 'app', 'index.html')), 'staged artifact ret
 const stagedApp = fs.readFileSync(path.join(staged, 'app', 'index.html'));
 const stagedEmbed = fs.readFileSync(path.join(staged, 'app', 'embed.htm'));
 A.ok(stagedEmbed.equals(stagedApp), 'staged artifact carries a unique dashboard-upload-safe embed entry');
+const stagedSpecialties = path.join(staged, 'shared', 'specialties.js');
+A.ok(fs.existsSync(stagedSpecialties), 'staged artifact carries the shared specialty catalog required by the embedded station');
+A.ok(fs.readFileSync(stagedSpecialties).equals(fs.readFileSync(path.join(root, 'shared', 'specialties.js'))),
+  'the staged shared specialty catalog is byte-identical to backend/frontend authority');
 
 // 2026-09-03: the GitHub Pages workflow was removed — Pages was never enabled and it failed on
 // every trunk push since 2026-08-11. The real deploy is 'wrangler pages deploy website-deploy' by
@@ -39,7 +43,9 @@ A.eq(/data-social|discord\.gg|x\.com\/yourhandle/.test(home), false, 'homepage c
 const site = fs.readFileSync(path.join(root, 'website', 'site.js'), 'utf8');
 A.ok(/el\.hidden = !PRICING_LIVE/.test(site), 'the release flag explicitly reveals or hides every pricing fragment');
 A.eq(/RELEASES_PAGE/.test(site), false, 'unused release-page alias is gone');
-A.ok(/FALLBACK_VERSION = '0\.10\.13'/.test(site), 'offline release fallback is the latest signed train');
+const fallback = /FALLBACK_VERSION = '(\d+\.\d+\.\d+)'/.exec(site);
+A.ok(fallback, 'offline release fallback is an explicit public version');
+A.ok(fallback && home.includes('<span id="ver-badge">v' + fallback[1] + '</span>') && home.includes('<span class="ver">v' + fallback[1] + '</span>'), 'raw homepage release labels agree with the offline fallback');
 
 const privacy = fs.readFileSync(path.join(root, 'website', 'legal', 'privacy.html'), 'utf8');
 A.ok(/Edge Read Aloud/.test(privacy) && !/Live Voice works with no network at all/.test(privacy), 'public voice disclosure names the network fallback without an absolute offline claim');

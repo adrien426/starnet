@@ -114,7 +114,7 @@ function boot(opts) {
     document: { getElementById: id => nodes[id] || null, addEventListener() {} },
     navigator: hasRecorder ? { mediaDevices: { getUserMedia: makeGum() } } : { mediaDevices: undefined },
     location: { search: opts.recorder ? '?stt=recorder' : '' },
-    localStorage: (() => { const m = {}; return { getItem: k => (k in m ? m[k] : null), setItem: (k, v) => m[k] = String(v), removeItem: k => delete m[k] }; })(),
+    localStorage: opts.localStorage || (() => { const m = {}; return { getItem: k => (k in m ? m[k] : null), setItem: (k, v) => m[k] = String(v), removeItem: k => delete m[k] }; })(),
     SpeechRecognition: hasRecorder ? undefined : MockSR,
     MediaRecorder: hasRecorder ? MockMR : undefined,
     AudioContext: MockAC,
@@ -135,7 +135,7 @@ function boot(opts) {
   // speechSynthesis is DELETED from the speak path; a test may inject a spy to prove it's never invoked.
   sandbox.globalThis = sandbox;
   win.SpeechRecognition = hasRecorder ? undefined : MockSR;
-  win.AudioContext = MockAC;
+  win.AudioContext = opts.AudioContext || MockAC;
   win.speechSynthesis = opts.speechSynthesis || undefined;
   vm.createContext(sandbox);
   vm.runInContext(SRC + '\nthis.__Voice = Voice;', sandbox, { filename: 'voice.js' });
@@ -188,6 +188,50 @@ async function opensWithin(t, ms) {
 }
 
 (async () => {
+  // Both production effects graphs must survive output-device closure. Never capture a
+  // fresh media element into a graph that cannot render (including rejected resume).
+  for (const shell of [true, false]) {
+    const contexts = [], captured = [], resumes = [];
+    let deviceState = 'running';
+    const node = () => new Proxy({ connect() {}, disconnect() {}, start() {} }, {
+      get(target, key) { return key in target ? target[key] : (target[key] = { value: 0 }); }
+    });
+    class DeviceAC extends MockAC {
+      constructor() { super(); this.state = deviceState; contexts.push(this); }
+      createGain() { return node(); }
+      createBiquadFilter() { return node(); }
+      createWaveShaper() { return node(); }
+      createDelay() { return node(); }
+      createDynamicsCompressor() { if (!shell) throw new Error('no shell'); return node(); }
+      createOscillator() { return node(); }
+      createConvolver() { return node(); }
+      createBuffer(_channels, length) { return { getChannelData: () => new Float32Array(length) }; }
+      createMediaElementSource() { captured.push(this); return node(); }
+      close() { this.state = 'closed'; return Promise.resolve(); }
+      resume() { resumes.push(this.state); return Promise.reject(new Error('device unavailable')); }
+    }
+    const t = boot({ Audio: AutoEndAudio, AudioContext: DeviceAC,
+      fetch: async () => ({ ok: true, headers: { get: () => 'audio/wav' }, blob: async () => ({ size: 1 }) }) });
+    t.Voice.setSpeakReplies(true);
+    t.Voice.speak('Before device change.', 'agent');
+    await until(() => captured.length === 1 && !t.Voice.isReplyPending(), 1000);
+    const first = captured[0];
+    A.ok(!!first, 'device recovery: initial graph captures audio');
+    await first.close();
+    t.Voice.speak('After device change.', 'agent');
+    await until(() => captured.length === 2 && !t.Voice.isReplyPending(), 1000);
+    A.ok(captured[1] !== first && captured[1].state === 'running', 'device recovery: closed graph replaced for ' + (shell ? 'shell' : 'transmission'));
+    for (const state of ['suspended', 'interrupted']) {
+      deviceState = state;
+      for (const ctx of contexts) if (ctx.state !== 'closed') ctx.state = state;
+      const count = captured.length;
+      t.Voice.speak('Use native playback while recovery is unavailable.', 'agent');
+      await until(() => !t.Voice.isReplyPending(), 1000);
+      A.eq(captured.length, count, 'device recovery: ' + state + ' graph cannot steal native output');
+      A.ok(resumes.includes(state), 'device recovery: ' + state + ' resume attempted without unhandled rejection');
+    }
+    t.Voice.stopSpeaking();
+  }
   // --- standard voice is one click to record, a second click to finish; Local Live stays automatic ----
   {
     const calls = [];
@@ -257,8 +301,49 @@ async function opensWithin(t, ms) {
 
   A.ok(!/cb\.onInterim\([\s\S]{0,100}repeat\(/.test(SRC), 'recorder progress never writes fake dot or bullet text into the composer');
 
+  // Final recognition and live previews are independent: having a cloud credential must not disable
+  // the installed local preview engine. Windows-only stations preview their captured PCM as well.
+  for (const preferred of ['cloud', 'native']) {
+    const t = boot({ desktop: true, fetch: (url) => {
+      if (url === '/api/stt/status') return Promise.resolve({ ok: true, json: async () => ({
+        available: true, preferred, local: preferred === 'cloud', native: true
+      }) });
+      if (url === (preferred === 'cloud' ? '/api/local-voice/transcribe' : '/api/stt/native')) {
+        return Promise.resolve({ ok: true, json: async () => ({ok: true, text: 'visible before I finish'}) });
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    } });
+    await tick(); t.Voice.startListening();
+    await until(() => processorInstances.length > 0, 500);
+    const processor = processorInstances[processorInstances.length - 1];
+    const speech = new Float32Array(2048).fill(.18);
+    for (let i=0;i<18;i++) processor.fire(speech);
+    await until(() => t.nodes['chat-input'].value === 'visible before I finish', 1000);
+    A.eq(t.nodes['chat-input'].value, 'visible before I finish', preferred + ' voice exposes interim words before the second click');
+    A.eq(t.sandbox.__sent.length, 0, preferred + ' preview does not send a task');
+    t.Voice.stopConvo(); await tick();
+  }
+
   // Browser recognition may end its own instance after a pause even in continuous mode. Standard voice
   // keeps the take open, retains those words, and sends them only when the Commander clicks again.
+  {
+    const pending = [], heard = [];
+    const t = boot({ desktop: true, fetch: url => {
+      if (url === '/api/stt/native') return new Promise(resolve => pending.push(text => resolve({ok:true,json:async()=>({ok:true,text})})));
+      return Promise.resolve({ok:true,json:async()=>({available:true,preferred:'native'})});
+    } });
+    await tick();
+    t.Voice.startCoordinator({onTranscript:text=>{heard.push(text);return true;}});
+    await tick();
+    t.Voice.pauseCoordinator(); t.Voice.resumeCoordinator(); await tick();
+    A.eq(pending.length, 2, 'resume starts a new Windows recognition');
+    pending[0]('discarded before pause'); await tick();
+    A.eq(heard.length, 0, 'a late native result cannot submit speech discarded by pause');
+    A.ok(t.Voice.isListening(), 'old native completion cannot clear the resumed listener');
+    pending[1]('fresh after resume'); await tick();
+    A.eq(heard[0], 'fresh after resume', 'the resumed recognition still delivers');
+    t.Voice.stopCoordinator(); await tick();
+  }
   {
     const t = boot();
     t.nodes['chat-mic'].onclick(); await tick();
@@ -352,7 +437,7 @@ async function opensWithin(t, ms) {
     t.Voice.setSpeakReplies(true);
     t.Voice.speak('hello commander, systems are nominal', 'agent'); await tick(40);
     const title = String(t.nodes['voice-toggle'].title || '');
-    A.ok(/real voice|backup voice/i.test(title), 'voice degrade: honest reason pinned on the speaker-toggle tooltip (telemetry preserved)');
+    A.ok(/Speech interrupted|real voice|backup voice/i.test(title), 'voice degrade: honest reason pinned on the speaker-toggle tooltip (telemetry preserved)');
     A.ok(!t.statusLog.some(s => /real voice|backup voice|voice provider/i.test(String(s))), 'voice degrade: outage banner is NEVER pushed to the COMMS status bar');
     A.ok(!/real voice|backup voice/i.test(String(t.nodes['chat-status'].textContent || '')), 'voice degrade: #chat-status text carries no voice-outage banner');
   }
@@ -402,12 +487,12 @@ async function opensWithin(t, ms) {
     t.Voice.attachCoordinator({ onState: state => states.push(state), onOutputLevel: level => levels.push(level) });
     t.Voice.setSpeakReplies(true);
     t.Voice.speak('this chunk begins and then fails to decode', 'agent');
-    await tick(70);
+    await until(() => revoked === 2 && !t.Voice.isSpeaking(), 1000);
     A.ok(states.includes('speaking'), 'post-play failure: speaking state was genuinely entered');
     A.ok(t.Voice.isSpeaking() === false, 'post-play failure: speaking state is cleared (no stuck agent turn)');
     A.ok(states.includes('ready'), 'post-play failure: coordinator returns to ready');
     A.ok(levels.some(level => level === 0), 'post-play failure: live output meter receives its terminal zero');
-    A.ok(revoked === 1, 'post-play failure: playback blob URL is revoked exactly once');
+    A.ok(revoked === 2, 'post-play failure: both bounded playback attempts release their blob URL');
   }
 
   // --- a FAILED neural chunk NEVER invokes speechSynthesis.speak (robotic path deleted) ---------
@@ -456,6 +541,64 @@ async function opensWithin(t, ms) {
     A.ok(state.spoken.some(s => /Third sentence/.test(s)), 'blip: every remaining sentence is spoken, not just the one after the failure');
   }
 
+  {
+    const received=[];const t=boot({Audio:AutoEndAudio,fetch:(url,o)=>{
+      if (String(url).includes('/api/tts')) received.push(JSON.parse(o.body).text);
+      return Promise.resolve({ok:true,headers:{get:()=> 'audio/wav'},blob:async()=>({size:128}),json:async()=>({})});
+    }});
+    t.Voice.setSpeakReplies(true);
+    const sentence='This opening clause, followed by enough context to make the whole sentence comfortably longer than one hundred and forty characters, must remain one synthesis request.';
+    t.Voice.speak(sentence,'agent');await tick(30);
+    A.eq(received.join('|'),sentence,'continuity: no second comma splitter inside voice queue');
+  }
+  // Continuity: prefetch completes out of order, playback retries remain in order, no missing tail.
+  {
+    const pending = [], played = []; let failFirst = true;
+    class OrderedAudio extends MockAudio {
+      play() { const text = this.src; played.push(text);
+        // Model asynchronous media events without racing three host timers against a 40ms wait.
+        queueMicrotask(() => { if (this.onplay) this.onplay();
+          if (failFirst) { failFirst = false; this.error = {code: 3}; if (this.onerror) this.onerror(); }
+          else if (this.onended) this.onended(); });
+        return Promise.resolve();
+      }
+    }
+    const t = boot({ Audio: OrderedAudio, fetch: (url,o) => String(url).includes('/api/tts')
+      ? new Promise(resolve=>pending.push({text:JSON.parse(o.body).text, resolve}))
+      : Promise.resolve({ok:true,json:async()=>({})}) });
+    t.sandbox.URL.createObjectURL = blob => blob.text;
+    t.Voice.setSpeakReplies(true);
+    t.Voice.speakChunk('First complete sentence.', 'agent');
+    t.Voice.speakChunk('Second complete sentence.', 'agent');
+    t.Voice.endReply();
+    A.eq(pending.length, 2, 'continuity: next sentence synthesizes ahead of playback');
+    pending[1].resolve({ok:true,headers:{get:()=> 'audio/wav'},blob:async()=>({size:128,text:pending[1].text})});
+    await tick(10); A.eq(played.length,0,'continuity: ready second sentence cannot overtake first');
+    pending[0].resolve({ok:true,headers:{get:()=> 'audio/wav'},blob:async()=>({size:128,text:pending[0].text})});
+    // Three asynchronous playback events (including retry) must finish. A 40ms sample can observe
+    // the last play() before its onended callback on a busy host; wait for the bounded outcome.
+    await until(() => played.length === 3 && !t.Voice.isReplyPending(), 1000);
+    A.eq(played.join('|'),'First complete sentence.|First complete sentence.|Second complete sentence.', 'continuity: failed playback retries same audio before later sentence');
+    A.eq(t.Voice.isReplyPending(),false,'continuity: successful retry drains final tail');
+  }
+  {
+    const requests=[];
+    const t=boot({Audio:AutoEndAudio,fetch:(url,o)=> {
+      if (!String(url).includes('/api/tts')) return Promise.resolve({ok:true,json:async()=>({})});
+      requests.push(JSON.parse(o.body).text);
+      return Promise.resolve({ok:false,status:503,headers:{get:()=> 'application/json'},json:async()=>({reason:'unavailable'})});
+    }});
+    t.Voice.setSpeakReplies(true);const token=t.Voice.replyToken();
+    t.Voice.speakChunk('The failed sentence.', 'agent', {replyToken:token});
+    t.Voice.endReply();await tick(30);
+    A.eq(requests.length,3,'continuity: synthesis exhaustion bounded to three attempts');
+    A.ok(/Speech interrupted/.test(t.nodes['voice-toggle'].title),'continuity: exhaustion is visible immediately');
+    t.Voice.speakChunk('Late text from the same failed reply.', 'agent', {replyToken:token});
+    A.eq(requests.length,3,'continuity: late producer cannot restart interrupted reply');
+    A.ok(t.Voice.speechDiagnostics().some(e=>e.reason==='synthesis_failure'),'continuity: synthesis cutoff is attributed');
+    A.ok(!t.Voice.speechDiagnostics().some(e=>JSON.stringify(e).includes('The failed sentence')),'continuity: diagnostics omit reply text');
+  }
+
   // --- Local Live pins one voice AND one serving engine for the whole conversation ------------
   // Without this pin, every streamed sentence reread localStorage and independently chose Kokoro vs Edge.
   // A settings click or one transient local-engine failure could therefore change speaker mid-conversation.
@@ -474,6 +617,7 @@ async function opensWithin(t, ms) {
       return Promise.resolve({ ok: true, headers: { get: () => 'application/json' }, json: () => Promise.resolve({ text: 'words' }), blob: () => Promise.resolve({ size: 1 }) });
     };
     const t = boot({ audio: true, Audio: AutoEndAudio, fetch: stableVoiceFetch });
+    const timings=[];t.Voice.attachCoordinator({onTiming:value=>timings.push(value)});
     t.sandbox.localStorage.setItem('starnet.liveVoice.localVoice.v1', 'am_onyx');
     t.Voice.setSpeakReplies(true);
     t.Voice.setLocalTts(true);
@@ -485,7 +629,59 @@ async function opensWithin(t, ms) {
     A.eq(requests[0].localVoice, 'am_onyx', 'Local Live snapshots the selected voice when the session begins');
     A.eq(requests[1].localVoice, 'am_onyx', 'a mid-session picker change cannot switch the conversation voice');
     A.eq(requests[1].localEngine, 'local-kokoro', 'the first serving engine is pinned on later turns');
+    await until(()=>timings.length > 0,1000);
+    A.ok(timings.length > 0 && timings.every(v=>Number.isFinite(v.audioStartMs) && v.audioStartMs >= 0), 'latency is emitted only when actual audio playback starts');
     A.ok(requests.every(r => r.local === true), 'the stable-voice requests remain on the built-in Live Voice path');
+  }
+
+  // Stable agent IDs own assignments; queued speech and live calls keep their selected identity.
+  {
+    const requests = [];
+    const fetch = (url, o) => {
+      if (url !== '/api/tts') return Promise.resolve({ok:true, json:async()=>({})});
+      requests.push(JSON.parse(o.body));
+      return Promise.resolve({ok:true, status:200,
+        headers:{get:n=>n.toLowerCase()==='content-type' ? 'audio/wav' : 'local-kokoro'},
+        blob:async()=>({size:128})});
+    };
+    const t = boot({audio:true, Audio:AutoEndAudio, fetch});
+    t.Voice.setVoiceChoice('am_onyx');
+    t.Voice.setVoiceChoice('af_nova', 'scout');
+    t.Voice.setVoiceChoice('bm_george', 'builder');
+    t.Voice.setSpeakReplies(true);
+    const say = async (agentId, name) => {
+      const count = requests.length;
+      t.Voice.speakChunk('This is a short reply.', name, {agentId});
+      t.Voice.endReply();
+      await until(()=>requests.length > count && !t.Voice.isReplyPending(), 1000);
+      return requests[count];
+    };
+    A.eq((await say('scout', 'SCOUT')).localVoice, 'af_nova', 'scout speaks with its assigned voice');
+    A.eq((await say('builder', 'BUILDER')).localVoice, 'bm_george', 'builder has a distinct assigned voice');
+    A.eq((await say('scout', 'RENAMED')).localVoice, 'af_nova', 'renaming cannot change the stable agent voice');
+    A.ok(requests.every(r=>r.local), 'assigned voices use the built-in engine even outside hands-free');
+    const reloaded = boot({localStorage:t.sandbox.localStorage});
+    A.eq(reloaded.Voice.localVoiceId('scout'), 'af_nova', 'assignment survives frontend reinitialization');
+    t.Voice.setLocalTts(true);
+    await say('scout', 'SCOUT');
+    t.Voice.setVoiceChoice('af_heart', 'scout');
+    A.eq((await say('scout', 'SCOUT')).localVoice, 'af_nova', 'live agent voice remains pinned after a settings change');
+    A.eq((await say('builder', 'BUILDER')).localVoice, 'bm_george', 'switching live agents uses the new speaker assignment');
+    t.Voice.setLocalTts(false); t.Voice.setLocalTts(true);
+    A.eq((await say('scout', 'SCOUT')).localVoice, 'af_heart', 'new live call adopts the saved change');
+    t.Voice.setLocalTts(false);
+    t.Voice.setVoiceChoice('', 'scout');
+    A.eq(t.Voice.localVoiceId('scout'), 'am_onyx', 'clearing an assignment restores station inheritance');
+    t.sandbox.Workstreams = {active:()=>({agentId:'builder'}),get:()=>({agentId:'scout'})};
+    A.eq(t.Voice.currentAgentId(), 'builder', 'ordinary voice follows the active session agent');
+    t.sandbox.VoiceLive = {boundSessionId:()=> 'bound'};
+    A.eq(t.Voice.currentAgentId(), 'scout', 'live voice follows its bound session despite browsing elsewhere');
+    t.sandbox.window.__TAURI__ = {}; t.sandbox.navigator.platform = 'MacIntel';
+    A.ok(t.Voice.microphoneHelp().includes('Privacy & Security'), 'desktop Mac recovery directs to system microphone settings');
+    t.sandbox.localStorage.setItem = () => { throw new Error('storage full'); };
+    let refused = false;
+    try { t.Voice.setVoiceChoice('af_nova', 'scout'); } catch (_) { refused = true; }
+    A.ok(refused, 'failed storage never returns a false saved acknowledgement');
   }
 
   // --- a transient failure is RETRIED once, so a one-shot blip loses NOTHING -------------------
@@ -522,7 +718,7 @@ async function opensWithin(t, ms) {
     const t = boot({ fetch: countingFetch(state, 'no key; edge: edge timeout') });
     t.Voice.setSpeakReplies(true);
     t.Voice.speak('first line on a keyless station', 'agent'); await tick(40);
-    A.eq(state.tts, 2, 'keyless + edge blip: the transient RETRY fires (2 round-trips, not 1)');
+    A.eq(state.tts, 3, 'keyless + edge blip: two bounded retries retain the chunk');
     A.ok(!/needs an OpenRouter, Gemini, or OpenAI credential/.test(String(t.nodes['voice-toggle'].title || '')),
       'keyless + edge blip: the tooltip does NOT demand a credential for a network blip');
     // the SHORT (4s) cold-off, not the 60s billing one → the next reply re-probes
@@ -555,7 +751,7 @@ async function opensWithin(t, ms) {
     t.Voice.setSpeakReplies(true);
     t.Voice.speak('a line during a rate limit', 'agent'); await tick(40);
     A.ok(!/out of credits/.test(String(t.nodes['voice-toggle'].title || '')), 'a per-minute 429 is NOT reported as "out of credits"');
-    A.eq(state.tts, 2, 'a per-minute 429 IS retried');
+    A.eq(state.tts, 3, 'a per-minute 429 is retried twice');
   }
   // ...but OpenAI's terminal insufficient_quota (also a 429) must stay in the billing class.
   {
@@ -663,5 +859,27 @@ async function opensWithin(t, ms) {
     A.eq(muted.opened, true, 'the mic RE-OPENS after muting mid-reply (no wedge)');
   }
 
+  {
+    const t = boot({recorder:true, ttsKey:true});
+    const token = t.Voice.replyToken();
+    t.Voice.stopSpeaking();
+    t.Voice.speakChunk('A late chunk must stay silent.', 'agent', {replyToken:token});
+    A.eq(t.Voice.isReplyPending(), false, 'interrupted reply cannot restart from a late model chunk');
+  }
+  {
+    const pending=[];let cancelled=0;
+    const t=boot({desktop:true,fetch:url=>Promise.resolve({ok:true,json:async()=>({available:true,preferred:'local',local:true})})});
+    t.sandbox.VoiceStream={open:()=>({failed:false,push(){},cancel(){cancelled++;},finish:()=>new Promise(resolve=>pending.push(resolve))})};
+    await tick();t.Voice.startListening();await until(()=>processorInstances.length>0,1000);
+    processorInstances[processorInstances.length-1].fire(new Float32Array(2048).fill(.2));
+    t.Voice.stopListening();await until(()=>pending.length===1,1000);
+    t.Voice.pauseCoordinator();t.Voice.resumeCoordinator();t.Voice.startListening();
+    await until(()=>t.Voice.isListening(),1000);
+    A.ok(cancelled>0,'pause cancels a stream whose final recognition is still pending');
+    pending[0]({text:'old interrupted take'});await tick();
+    A.eq(t.sandbox.__sent.length,0,'late recorder result cannot submit into a resumed take');
+    A.ok(t.Voice.isListening(),'late recorder result cannot end the resumed listener');
+    t.Voice.stopConvo();
+  }
   A.report('voice.button.test');
 })().catch(e => { console.log('FAIL: harness threw — ' + (e && e.stack || e)); process.exit(1); });

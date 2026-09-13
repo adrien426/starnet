@@ -3,94 +3,13 @@
    is active. Premium rebuild (agent/recruit-bay): a struck-metal console — engraved class SEALS (never a
    character skin), a two-pane character-select / DOSSIER layout, lane filter, clearance pips, footer. */
 
-.mkt-scrim {
-  position: fixed; inset: 0; z-index: var(--z-overlay, 9000);
-  display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(ellipse 90% 70% at 50% 40%, rgba(0,0,0,.72), rgba(0,0,0,.9));
-  backdrop-filter: blur(1px);
-  animation: mkt-fade .14s ease-out;
-}
-/* CRT GLASS scanlines for the bay. The global scanline layer (style.css `body::after`, z950) can't
-   reach here — this scrim sits at z9000 and its ~72-90% black backdrop buries whatever's behind it, so
-   the bay would read as the ONE surface with no beam lines. Paint our own, over the console (pointer-
-   events:none), byte-for-byte matching `body::after` so it's indistinguishable from every window's glass.
-   SOURCE OF TRUTH for these stops = style.css `body::after` — retune both together. Respects `no-scan`. */
-.mkt-scrim::after {
-  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 20;
-  /* screen-space glass, same law as `body::after` — TEXT SIZE's body zoom multiplies into every
-     hard px here too, so each stop carries the same --cz reciprocal (stationui's --sn-unzoom).
-     Without it the bay's beam pitch stretched with the text while the rest of the station's did
-     not, which is exactly the "one surface whose glass doesn't match" this layer exists to avoid. */
-  --cz: var(--sn-unzoom, 1);
-  background:
-    repeating-linear-gradient(0deg,
-      rgba(0,0,0,0) 0px,
-      rgba(0,0,0,0) calc(1px * var(--cz)),
-      rgba(0,0,0,var(--scan-shoulder, 0.13)) calc(1.5px * var(--cz)),
-      rgba(0,0,0,var(--scan-core, 0.30)) calc(2px * var(--cz)),
-      rgba(0,0,0,var(--scan-shoulder, 0.13)) calc(2.5px * var(--cz)),
-      rgba(0,0,0,0) calc(3px * var(--cz))),
-    repeating-linear-gradient(90deg,
-      rgba(255,80,40,0.03) 0 calc(1px * var(--cz)),
-      rgba(40,180,120,0.02) calc(1px * var(--cz)) calc(2px * var(--cz)),
-      rgba(60,120,255,0.03) calc(2px * var(--cz)) calc(3px * var(--cz)));
-}
-@media (min-resolution: 1.75dppx) {
-  .mkt-scrim::after {
-    background:
-      repeating-linear-gradient(0deg,
-        rgba(0,0,0,0) 0px,
-        rgba(0,0,0,0) calc(1.5px * var(--cz)),
-        rgba(0,0,0,var(--scan-shoulder, 0.13)) calc(2.2px * var(--cz)),
-        rgba(0,0,0,var(--scan-core-hi, 0.28)) calc(3px * var(--cz)),
-        rgba(0,0,0,var(--scan-shoulder, 0.13)) calc(3.8px * var(--cz)),
-        rgba(0,0,0,0) calc(4.5px * var(--cz))),
-      repeating-linear-gradient(90deg,
-        rgba(255,80,40,0.03) 0 calc(1.5px * var(--cz)),
-        rgba(40,180,120,0.02) calc(1.5px * var(--cz)) calc(3px * var(--cz)),
-        rgba(60,120,255,0.03) calc(3px * var(--cz)) calc(4.5px * var(--cz)));
-  }
-}
-body.no-scan .mkt-scrim::after { display: none; }
-/* the CRT dial needs no rule here: --scan-* are set on `body.crt-dull` and custom properties
-   INHERIT, so the bay scrim thins with the rest of the glass automatically. That is the
-   "retune both together" law held structurally instead of by memory. */
-@keyframes mkt-fade { from { opacity: 0; } to { opacity: 1; } }
-
-/* ---- the console frame ----
-   SIZED OFF THE SCRIM (%), NEVER THE VIEWPORT (vw/vh). TEXT SIZE is a body zoom, and a vh length
-   inside the zoomed subtree still computes against the REAL viewport and is THEN multiplied by the
-   zoom — so `92vh` rendered as 133vh at HUGE. Measured at 1440x900 before this line existed:
-   100% 1180x828 fits · 115% 1357x952 · 130% 1440x1076 · 145% 1440x1201, overflowing top AND bottom
-   (the scrim centres, so the excess splits) and taking the ✕ with it: the close button sat at
-   top:-4 / -63 / -122 px, i.e. OFF the glass. The bay could not be closed with the mouse at any
-   size above STANDARD — and 115% is what AUTO picks on a ≤1470px laptop, so this was the DEFAULT
-   on a small screen. The scrim is `position:fixed; inset:0`, which under zoom is viewport-exact
-   (probe: 1440x900 at every scale), so 100% of it IS the glass in the bay's own zoomed frame —
-   identical to 100vw/100vh at textScale 100, and correct at every other. Same law as `.refit-dock`
-   in app.css and the `--sn-unzoom` caps on `.term` in style.css. */
-.mkt {
-  position: relative; width: min(1180px, 96%); max-height: 92%; display: flex; flex-direction: column;
-  background: radial-gradient(ellipse 130% 90% at 50% 0%, var(--ph-glow2), transparent 44%), var(--panel);
-  border-radius: var(--r-lg, 11px);
-  box-shadow: var(--bezel, 0 0 0 2px var(--ph), 0 0 0 3.5px rgba(0,0,0,.9), 0 12px 34px rgba(0,0,0,.85), inset 0 0 56px rgba(0,0,0,.85));
-}
-.mkt::before { content: ""; position: absolute; inset: 0; border-radius: var(--r-lg, 11px); pointer-events: none; z-index: 5;
-  background: var(--glass, none); }
-.mkt::after { content: ""; position: absolute; inset: 0; border-radius: var(--r-lg, 11px); pointer-events: none; z-index: 6;
-  background: linear-gradient(115deg, transparent 38%, rgba(255,240,214,.045) 47%, transparent 56%);
-  background-size: 280% 280%; animation: mkt-glare 11s linear infinite; }
-@keyframes mkt-glare { from { background-position: 160% 0; } to { background-position: -60% 0; } }
-.mkt-screw { position: absolute; width: 9px; height: 9px; border-radius: 50%; z-index: 7;
-  background: radial-gradient(circle at 35% 30%, #4a3414, #140c03 70%);
-  box-shadow: 0 0 0 1px rgba(0,0,0,.8), inset 0 0 2px rgba(255,210,150,.4); }
-.mkt-screw.tl { top: 9px; left: 9px; } .mkt-screw.tr { top: 9px; right: 9px; }
-.mkt-screw.bl { bottom: 9px; left: 9px; } .mkt-screw.br { bottom: 9px; right: 9px; }
-.mkt-brk { position: absolute; width: 15px; height: 15px; border: 2px solid var(--ph-dim); z-index: 7; opacity: .7; }
-.mkt-brk.tl { top: 4px; left: 4px; border-right: 0; border-bottom: 0; }
-.mkt-brk.tr { top: 4px; right: 4px; border-left: 0; border-bottom: 0; }
-.mkt-brk.bl { bottom: 4px; left: 4px; border-right: 0; border-top: 0; }
-.mkt-brk.br { bottom: 4px; right: 4px; border-left: 0; border-top: 0; }
+/* Recipes and Recruitment are standard wide station windows. Their inner catalog never
+   sizes itself against the viewport; the shared term manager owns all geometry and glass. */
+.mkt-window .mkt-window-body { display: flex; padding: 0; overflow: hidden; }
+.mkt-host { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.mkt { position: relative; display: flex; flex-direction: column; flex: 1 1 auto;
+  width: 100%; min-width: 0; min-height: 0; max-height: 100%; container-type: inline-size; }
+.mkt:focus { outline: none; }
 
 /* ---- head: nameplate + status + search + close ---- */
 .mkt-head {
@@ -896,3 +815,355 @@ button.mkt-archive-head:focus-visible { outline: 2px solid var(--gold); outline-
 .mkt-rec-rail.mkt-rail-deep::-webkit-scrollbar-track { background: rgba(var(--ph-rgb), .08); }
 .mkt-rec-rail.mkt-rail-deep::-webkit-scrollbar-thumb { background: rgba(var(--ph-rgb), .35); border-radius: 3px; }
 .mkt-rec-rail.mkt-rail-deep::-webkit-scrollbar-thumb:hover { background: rgba(var(--ph-rgb), .55); }
+
+/* Recruitment follows the cockpit: compact manifest rows, recessed portrait wells and
+   molded header strips. Keep these agent-only rules separate from the recipe library. */
+.mkt .mkt-head { padding: 6px 16px; gap: 8px; border-color: var(--ph-faint); }
+.mkt .mkt-title { padding: 0; color: var(--ph-bright); background: none;
+  box-shadow: none; font-size: 21px; letter-spacing: 3px; }
+.mkt .mkt-sub { margin-top: 0; font-size: 13px; letter-spacing: .3px; }
+.mkt .mkt-search { width: 200px; min-width: 0; flex-shrink: 0; padding: 4px 8px;
+  border-color: var(--ui-edge); background: var(--panel); box-shadow: var(--ui-well); }
+.mkt .mkt-search:focus-within { border-color: var(--ph-dim); }
+.mkt .mkt-search input { min-width: 0; min-height: 0; padding: 0; font-size: 13px; line-height: 20px; }
+.mkt .mkt-x { border-width: 1px; font-size: 14px; box-shadow: none; }
+.mkt .mkt-bar { padding: 5px 16px; gap: 5px; }
+.mkt .mkt-lane { padding: 6px 13px; border-color: transparent; box-shadow: none; background: none; }
+.mkt .mkt-lane.on { background: var(--ui-face); color: var(--ph-bright); border-color: var(--ui-edge);
+  box-shadow: inset 0 1px 0 var(--ui-highlight); }
+.mkt .mkt-lanes-lbl { display: none; }
+.mkt .mkt-foot { border-color: var(--ui-edge); background: var(--ui-face); font-size: 11px; }
+.mkt-recruit { grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr); gap: 8px; padding: 8px; }
+.mkt-recruit .mkt-roster, .mkt-recruit .mkt-dossier { border: 1px solid var(--ph-faint); border-radius: 7px;
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .06); background: rgba(0,0,0,.15); overscroll-behavior: contain; }
+.mkt-recruit .mkt-roster { padding: 0 7px 24px; }
+.mkt-recruit .mkt-sect-h { font-size: 12px; letter-spacing: 2px; margin: 18px 5px 8px; }
+.mkt-recruit .mkt-grid.mkt-rows { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+.mkt-recruit .mkt-rows .mkt-card { grid-template-columns: 50px minmax(0, 1fr) auto; gap: 12px;
+  min-height: 76px; padding: 10px 12px; border: 1px solid transparent; border-left: 2px solid var(--ph-faint);
+  border-radius: 4px; background: linear-gradient(180deg, rgba(0,0,0,.3), rgba(0,0,0,.16));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .04); }
+.mkt-recruit .mkt-rows .mkt-card::before, .mkt-recruit .mkt-rows .mkt-card::after { display: none; }
+.mkt-recruit .mkt-rows .mkt-card:hover { transform: none; background: var(--ph-faint); border-left-color: var(--ph);
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .05); }
+.mkt-recruit .mkt-rows .mkt-card.sel { border-color: var(--ui-edge); border-left-color: var(--ph);
+  background: var(--ui-face); box-shadow: inset 0 1px 0 var(--ui-highlight), 0 2px 4px rgba(0,0,0,.3); }
+.mkt-recruit .mkt-card:focus-visible { outline: 2px solid var(--ph-bright); outline-offset: -2px; }
+.mkt-recruit .mkt-coin { --coin: 50px; border: 1px solid var(--ui-edge); border-radius: 3px;
+  background: radial-gradient(ellipse at 50% 70%, rgba(var(--ph-rgb),.12), transparent 72%), var(--panel);
+  box-shadow: var(--ui-well); }
+.mkt-recruit .mkt-coin-ico { width: 78%; height: 78%; filter: none; color: var(--ph); }
+.mkt-recruit .mkt-card.sel .mkt-coin { border-color: var(--ph-dim); }
+.mkt-recruit .mkt-card.sel .mkt-coin-ico { color: var(--ph); }
+.mkt-recruit .mkt-rows .mkt-card .mkt-name { font-size: 17px; text-transform: uppercase; letter-spacing: 1px; line-height: 1.15; }
+.mkt-recruit .mkt-rows .mkt-card .mkt-tag { color: var(--ph-dim); font-size: 13px; line-height: 1.2; margin-top: 4px; }
+.mkt-recruit .mkt-card-side { grid-column: auto; flex-direction: column; align-items: flex-end; gap: 6px; }
+.mkt-recruit .mkt-card-side .mkt-meta { display: none; }
+.mkt-recruit .mkt-card-code { font-size: 10px; letter-spacing: 1px; color: var(--ph-dim); }
+.mkt-recruit .mkt-rows .mkt-build { min-height: 62px; border-color: var(--ph-faint); box-shadow: none; }
+.mkt-recruit .mkt-rec-sect { font-size: 11px; letter-spacing: 1px; line-height: 1.4; }
+.mkt-recruit .mkt-rec-rail:not(.mkt-rail-deep) { gap: 4px; grid-template-columns: repeat(3,minmax(0,1fr)); }
+.mkt-recruit .mkt-rec { min-width: 0; border-color: var(--ph-faint); border-radius: 3px; box-shadow: none;
+  padding: 10px 5px 8px; background: rgba(0,0,0,.16); }
+.mkt-recruit .mkt-rec-top { flex-direction: column; gap: 6px; text-align: center; }
+.mkt-recruit .mkt-rec .mkt-coin { --coin: 35px; border: 0; background: none; box-shadow: none; }
+.mkt-recruit .mkt-rec-name { font-size: 13px; letter-spacing: .3px; }
+.mkt-recruit .mkt-rec-tag { display: none; }
+.mkt-recruit .mkt-rec-why { font-size: 11px; line-height: 1.25; text-align: center; margin-top: 5px; }
+.mkt-recruit .mkt-rec-why-k { display: none; }
+.mkt-recruit .mkt-lineup .mkt-rec-top { flex-direction: row; text-align: left; }
+.mkt-recruit .mkt-lineup .mkt-rec { padding: 8px 6px; }
+.mkt-recruit .mkt-lineup .mkt-coin { --coin: 28px; }
+.mkt-recruit .mkt-dossier { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.mkt-dos-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 20px 16px; flex: 1 1 auto; }
+.mkt-recruit :is(.mkt-roster, .mkt-dos-scroll, .skin-picker) { scrollbar-width: thin;
+  scrollbar-color: var(--ph-dim) transparent; overscroll-behavior: contain; }
+.mkt-recruit :is(.mkt-roster, .mkt-dos-scroll, .skin-picker)::-webkit-scrollbar { width: 6px; }
+.mkt-recruit :is(.mkt-roster, .mkt-dos-scroll, .skin-picker)::-webkit-scrollbar-thumb { background: var(--ph-dim); border-radius: 3px; }
+.mkt-recruit .mkt-dos-back { flex-shrink: 0; margin: 8px 12px; border-color: var(--ui-edge); background: var(--ui-face); }
+.mkt-recruit .mkt-dos-label, .mkt-recruit .mkt-config-h { display: flex; padding: 9px 14px; color: var(--ph-bright);
+  background: linear-gradient(180deg, rgba(var(--ph-rgb), .22), rgba(var(--ph-rgb), .10) 52%, rgba(var(--ph-rgb), .04));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .18), inset 0 -1px 0 rgba(0,0,0,.25);
+  font-size: 12px; letter-spacing: 2px; }
+.mkt-recruit .mkt-dos-label { margin: 0 -20px 14px; }
+.mkt-recruit .mkt-dos-hero { padding: 0 0 12px; gap: 17px; background: none; margin-bottom: 10px;
+  border-bottom: 1px solid var(--ph-faint); }
+.mkt-recruit .mkt-dos-hero .mkt-coin { --coin: 80px; }
+.mkt-recruit .mkt-dos-hero .mkt-coin-ico { width: 80%; height: 80%; }
+.mkt-recruit .mkt-dos-hero .mkt-seal-code { display: none; }
+.mkt-recruit .mkt-dos-name { font-size: 27px; line-height: 1.1; letter-spacing: 1px; }
+.mkt-recruit .mkt-dos-tag { color: var(--ph-dim); font-size: 14px; line-height: 1.3; }
+.mkt-recruit .mkt-dos-class { font-size: 10px; margin-top: 8px; letter-spacing: 2px; }
+.mkt-recruit .mkt-dos-meta { gap: 7px; margin-bottom: 12px; }
+.mkt-recruit .mkt-dos-meta .mkt-chip { font-size: 10px; letter-spacing: .5px; padding: 3px 5px; border-color: var(--ph-faint); }
+.mkt-recruit .mkt-about { margin: 10px 0 18px; }
+.mkt-recruit .mkt-about .bh { display: none; }
+.mkt-recruit .mkt-about .bp.lead { color: var(--text); font-size: 15px; line-height: 1.45; text-shadow: none; }
+.mkt-recruit .mkt-config { margin: 16px 0; background: rgba(0,0,0,.18); border: 1px solid var(--ph-faint);
+  border-radius: 5px; box-shadow: inset 0 2px 6px rgba(0,0,0,.35); overflow: hidden; }
+.mkt-recruit .mkt-config-h { gap: 8px; flex-direction: row; justify-content: space-between; }
+.mkt-recruit .mkt-config-ttl { font-size: 12px; letter-spacing: 1.5px; }
+.mkt-recruit .mkt-config-note { font-size: 12px; letter-spacing: .3px; flex: 0 0 auto; }
+.mkt-recruit-identity { display: grid; grid-template-columns: 86px minmax(0,1fr); gap: 14px; padding: 12px 14px; align-items: start; }
+.mkt-recruit-fields { min-width: 0; }
+.mkt-recruit .mkt-config .mkt-skinbar { padding: 0; }
+.mkt-recruit .mkt-config .mkt-skinlabel { font-size: 11px; letter-spacing: 1px; margin-bottom: 6px; }
+.mkt-recruit .mkt-namebar .mkt-in { margin: 0; font-size: 17px; padding: 8px 10px; width: 100%; box-sizing: border-box; }
+.mkt-recruit .mkt-name-meta { font-size: 11px; margin-top: 4px; gap: 8px; }
+.mkt-recruit .mkt-name-help:not(.warn) { display: none; }
+.mkt-recruit .mkt-name-count { margin-left: auto; }
+.mkt-recruit .mkt-config .mkt-modelbar { padding: 12px 14px; border-top: 1px solid var(--ph-faint); }
+.mkt-model-settings { border-top: 1px solid var(--ph-faint); }
+.mkt-model-settings > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+  color: var(--ph); padding: 12px 14px; font-size: 11px; letter-spacing: .5px; }
+.mkt-model-settings > summary::before { content: '▸'; color: var(--ph-dim); }
+.mkt-model-settings[open] > summary::before { content: '▾'; }
+.mkt-model-settings > summary:focus-visible { outline: 2px solid var(--ph); outline-offset: -2px; }
+.mkt-model-choice { margin-left: auto; color: var(--text); font-size: 12px; overflow-wrap: anywhere; text-align: right; }
+.mkt-recruit .mkt-modelbar > .mkt-skinlabel { display: none; }
+.mkt-recruit .mkt-modelpick .mp-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 6px; }
+.mkt-recruit .mkt-modelpick .mp-model, .mkt-recruit .mkt-modelpick .mp-effort {
+  width: 100%; min-width: 0; max-width: none; font-size: 13px; padding: 7px 22px 7px 8px; }
+.mkt-recruit .mkt-field-help { font-size: 12px; line-height: 1.25; margin-top: 6px; }
+.mkt-brief summary { cursor: pointer; list-style: none; color: var(--ph);
+  display: flex; align-items: center; gap: 8px; }
+.mkt-appearance { padding-top: 12px; }
+.mkt-appearance-heading { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  color: var(--ph-bright); font-size: 12px; letter-spacing: .5px; }
+.mkt-brief summary::before { content: '▸'; color: var(--ph-dim); }
+.mkt-brief[open] > summary::before { content: '▾'; }
+.mkt-recruit :is(.mkt-model-settings, .mkt-brief) > summary:hover { color: var(--ph-bright); }
+.mkt-recruit :is(.mkt-model-settings, .mkt-brief) > summary::-webkit-details-marker { display: none; }
+.mkt-appearance-choice { margin-left: auto; color: var(--text); font-size: 13px; letter-spacing: 0; }
+.mkt-brief summary:focus-visible { outline: 2px solid var(--ph); outline-offset: 2px; }
+.mkt-recruit .mkt-config .mkt-skin-stage { margin: 0; width: 86px; gap: 0; align-self: start; }
+.mkt-recruit .mkt-skin-stage-frame { width: 86px; height: 96px; min-height: 0;
+  background: radial-gradient(ellipse at 50% 70%, rgba(var(--ph-rgb),.12), transparent 72%), var(--panel);
+  border: 1px solid var(--ui-edge); border-radius: 3px; box-shadow: var(--ui-well); }
+.mkt-recruit .mkt-skin-stage-frame::before, .mkt-recruit .mkt-skin-stage-frame::after { display: none; }
+.mkt-recruit .mkt-skin-stage-frame img { width: 76px; height: 90px; object-fit: contain;
+  transform: scale(1.6); transform-origin: 50% 70%; }
+.mkt-recruit .mkt-skin-stage-name { font-size: 11px; letter-spacing: .5px; margin-top: 7px; }
+.mkt-recruit .mkt-config .mkt-appearance .mkt-skinbar { padding-top: 10px; }
+.mkt-recruit .mkt-config .mkt-skin-section .skin-picker { grid-template-columns: repeat(auto-fill, minmax(48px,1fr)); max-height: 132px; gap: 4px; }
+.mkt-recruit .skin-thumb { min-width: 0; min-height: 0; height: 62px; aspect-ratio: auto; padding: 2px;
+  overflow: hidden; align-items: center; border-color: var(--ph-faint); border-radius: 3px; }
+.mkt-recruit .skin-thumb img { width: 78px; height: 78px; max-width: none; flex: 0 0 auto; }
+.mkt-recruit .mkt-starters { font-size: 13px; line-height: 1.4; margin-top: 10px; }
+.mkt-recruit .mkt-brief { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--ph-faint); }
+.mkt-recruit .mkt-brief summary { font-size: 11px; letter-spacing: 1px; margin: 0; }
+.mkt-recruit .mkt-brief .bp { font-size: 14px; line-height: 1.4; padding-top: 8px; }
+.mkt-recruit .mkt-dos-cta { position: relative; bottom: auto; flex: 0 0 auto; margin: 0; padding: 12px 20px;
+  background: var(--panel); border-top: 1px solid var(--ph-faint); box-shadow: none; }
+.mkt-recruit .mkt-cta-main { font-size: 16px; padding: 11px 10px; letter-spacing: 1.5px; color: var(--ph-bright);
+  border: 1px solid var(--ph); border-radius: 3px; background: linear-gradient(180deg, var(--ph-faint), rgba(0,0,0,.3));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .16); }
+.mkt-recruit .mkt-cta-main:hover { background: var(--ph); color: var(--ink); }
+.mkt-recruit .mkt-cta-sub { font-size: 11px; line-height: 1.25; }
+@media (max-height: 850px) {
+  .mkt .mkt-head { padding-block: 6px; }
+  .mkt .mkt-bar { padding-block: 5px; }
+  .mkt-recruit .mkt-dos-hero .mkt-coin { --coin: 56px; }
+  .mkt-recruit .mkt-dos-hero { gap: 12px; padding-bottom: 9px; margin-bottom: 8px; }
+  .mkt-recruit .mkt-dos-name { font-size: 23px; }
+  .mkt-recruit .mkt-dos-class { display: none; }
+  .mkt-recruit .mkt-dos-label { margin-bottom: 10px; }
+  .mkt-recruit .mkt-dos-meta { margin-bottom: 8px; }
+  .mkt-recruit .mkt-about { margin: 8px 0 12px; }
+  .mkt-recruit .mkt-about .bp.lead { font-size: 14px; line-height: 1.35; }
+  .mkt-recruit .mkt-config { margin: 10px 0; }
+  .mkt-recruit .mkt-dos-cta { padding-block: 10px; }
+}
+@media (max-width: 820px) {
+  .mkt-recruit { grid-template-columns: minmax(0, 1fr); }
+  .mkt .mkt-head { flex-wrap: wrap; padding: 6px 12px; }
+  .mkt .mkt-nameplate { flex-basis: calc(100% - 55px); }
+  .mkt .mkt-search { order: 3; width: 100%; }
+  .mkt .mkt-bar { padding: 6px 10px; }
+  .mkt .mkt-sub { white-space: normal; }
+  .mkt.show-dossier:has(.mkt-recruit) .mkt-bar,
+  .mkt.show-dossier:has(.mkt-recruit) .mkt-search,
+  .mkt.show-dossier:has(.mkt-recruit) .mkt-sub { display: none; }
+  .mkt.show-dossier:has(.mkt-recruit) .mkt-title { font-size: 18px; letter-spacing: 1.5px; }
+  .mkt-recruit .mkt-dossier { display: none; }
+  .mkt.show-dossier .mkt-recruit .mkt-dossier { display: flex; }
+}
+@container (max-width: 850px) {
+  .mkt-recruit .mkt-rows .mkt-card { grid-template-columns: 42px minmax(0,1fr); gap: 9px; padding: 8px; }
+  .mkt-recruit .mkt-rows .mkt-coin { --coin: 42px; }
+  .mkt-recruit .mkt-card-side { display: none; }
+  .mkt-recruit .mkt-dos-scroll { padding-inline: 14px; }
+  .mkt-recruit .mkt-dos-label { margin-inline: -14px; }
+  .mkt-recruit .mkt-dos-cta { padding-inline: 14px; }
+  .mkt-recruit-identity { grid-template-columns: 70px minmax(0,1fr); gap: 10px; padding: 12px; }
+  .mkt-recruit .mkt-config .mkt-skin-stage, .mkt-recruit .mkt-skin-stage-frame { width: 70px; }
+  .mkt-recruit .mkt-skin-stage-frame img { width: 64px; }
+}
+@container (max-width: 660px) {
+  .mkt-recruit { grid-template-columns: minmax(0,1fr); }
+  .mkt-recruit .mkt-dossier { display: none; }
+  .mkt.show-dossier .mkt-recruit .mkt-roster { display: none; }
+  .mkt.show-dossier .mkt-recruit .mkt-dossier { display: flex; }
+  .mkt.show-dossier .mkt-recruit .mkt-dos-back { display: inline-flex; }
+}
+
+/* Recipe briefs use the same roster sockets and recessed dossier as Recruitment. */
+.mkt-recipes .mkt-card-side .mkt-meta { display: none; }
+.mkt-recipes .mkt-card-code { white-space: nowrap; font-size: 12px; letter-spacing: .3px; }
+.mkt-recipes .mkt-dos-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 20px 18px; }
+.mkt-recipes .mkt-dos-hero { align-items: center; }
+.mkt-recipes .mkt-dos-hi { min-width: 0; }
+.mkt-recipes .mkt-dos-hero .mkt-meta { margin-top: 10px; flex-wrap: wrap; gap: 5px; }
+.mkt-recipes .mkt-dos-hero .mkt-chip { font-size: 10px; padding: 2px 5px; border-color: var(--ui-edge); }
+.mkt-recipes .mkt-block pre { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.mkt-recipes .mkt-block .bh { font-size: 11px; letter-spacing: 1.2px; }
+.mkt-recipes .mkt-starters { color: var(--text); }
+.mkt-recipes .mkt-brief { padding: 12px 0; }
+.mkt-recipes .mkt-rec-rail:not(.mkt-rail-deep) { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.mkt-recipes .mkt-rec { padding: 10px; }
+.mkt-recipes .mkt-rec .mkt-coin { --coin: 34px; }
+.mkt-recipes .mkt-rec-name { font-size: 14px; }
+.mkt-recipes .mkt-toolbar { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; padding: 12px 5px 0; }
+.mkt-recipes .mkt-toolbar .mkt-hint { font-size: 12px; line-height: 1.4; }
+.mkt .mkt-sub { white-space: normal; line-height: 1.35; }
+.mkt .mkt-tabs { flex-basis: 100%; padding-bottom: 4px; }
+.mkt .mkt-tab { background: none; border-color: transparent; box-shadow: none; padding: 6px 12px; }
+.mkt .mkt-tab.on { background: var(--ui-face); color: var(--ph-bright); border-color: var(--ui-edge); box-shadow: inset 0 1px 0 var(--ui-highlight); }
+.mkt .mkt-bar .bb { font-size: 11px; }
+.mkt-stage.form { background: var(--ui-face); }
+.mkt-stage.form :is(.mkt-save, .mkt-launchform, .mkt-recipe-form) { max-width: 760px; margin-inline: auto; }
+@container (max-width: 660px) {
+  .mkt-head { flex-wrap: wrap; gap: 8px; }
+  .mkt .mkt-nameplate { flex-basis: 100%; }
+  .mkt .mkt-search { width: 100%; box-sizing: border-box; }
+  .mkt.show-dossier .mkt-search, .mkt.show-dossier .mkt-sub, .mkt.show-dossier .mkt-bar { display: none; }
+  .mkt-recipes .mkt-rec-rail:not(.mkt-rail-deep) { grid-template-columns: minmax(0,1fr); }
+  .mkt-recipes .mkt-dos-scroll { padding-inline: 14px; }
+}
+
+.mkt-recipes .mkt-foryou { min-height: 66px; padding: 10px 7px; }
+.mkt-recipes .mkt-foryou .mkt-rec-top { flex-direction: row; text-align: left; align-items: center; gap: 8px; }
+.mkt-recipes .mkt-foryou .mkt-rec-name { font-size: 13px; line-height: 1.2; }
+.mkt-recipes .mkt-foryou .mkt-coin { --coin: 28px; }
+.mkt-bar:has(.mkt-tabs) { display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
+.mkt-bar .mkt-tabs { grid-column: 1; grid-row: 1; }
+.mkt-bar:has(.mkt-tabs) .mkt-lanes { grid-column: 1 / -1; grid-row: 2; flex-wrap: wrap; min-width: 0; padding-bottom: 3px; }
+.mkt-bar:has(.mkt-tabs) .mkt-lane { flex: 0 0 auto; }
+.mkt-bar .mkt-from-notes { grid-column: 2; grid-row: 1; }
+.mkt-bar:has(.mkt-tabs) .mkt-import { grid-column: 3; grid-row: 1; }
+@container (max-width: 660px) {
+  .mkt-bar:has(.mkt-tabs) { grid-template-columns: minmax(0,1fr) auto; }
+  .mkt-bar .mkt-from-notes { grid-column: 1; grid-row: 3; justify-self: start; }
+  .mkt-bar:has(.mkt-tabs) .mkt-import { grid-column: 2; grid-row: 3; }
+  .mkt-recipes .mkt-rec-rail:not(.mkt-rail-deep) { grid-template-columns: minmax(0,1fr); }
+}
+
+/* Setup screens keep the same quiet, recessed form treatment as recruitment configuration. */
+.mkt-stage.form .mkt-save { border-color: var(--ui-edge); border-radius: 7px;
+  background: var(--panel); box-shadow: inset 0 1px 0 var(--ui-highlight); padding: 18px; }
+.mkt-stage.form .mkt-save-h { color: var(--ph-bright); background: none; box-shadow: none;
+  padding: 0; font-size: 21px; letter-spacing: 1px; margin-bottom: 12px; }
+.mkt-stage.form .mkt-in { border-color: var(--ui-edge); box-shadow: var(--ui-well); }
+.mkt-stage.form .mkt-save-acts { border-color: var(--ui-edge); }
+
+/* Recipe library: crew-like glass selection and a single, inline launch. */
+.mkt-recipes .mkt-rows .mkt-card {
+  grid-template-columns: 42px minmax(0, 1fr); gap: 12px; padding: 14px 12px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: linear-gradient(135deg, rgba(var(--ph-rgb), .06), rgba(var(--ph-rgb), .015));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .04);
+}
+.mkt-recipes .mkt-rows .mkt-card:hover,
+.mkt-recipes .mkt-rows .mkt-card.sel {
+  border-color: rgba(var(--ph-rgb), .3);
+  background: linear-gradient(125deg, rgba(var(--ph-bright-rgb), .14), rgba(var(--ph-rgb), .07) 48%, rgba(var(--ph-rgb), .025));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .2), inset 0 -1px 0 rgba(var(--ph-rgb), .08), 0 5px 18px rgba(0,0,0,.12);
+  backdrop-filter: blur(12px);
+}
+.mkt-recipes .mkt-rows .mkt-card .mkt-coin { --coin: 42px; }
+.mkt-recipes .mkt-card-side { display: none; }
+.mkt-recipes .mkt-rows .mkt-card .mkt-tag { line-height: 1.4; }
+.mkt-recipes .mkt-recipe-simple { padding-top: 24px; }
+.mkt-recipes .mkt-recipe-simple .mkt-dos-hero { border: 0; padding-bottom: 8px; }
+.mkt-recipes .mkt-recipe-simple .mkt-dos-tag { margin-top: 12px; font-size: 16px; line-height: 1.5; color: var(--text); }
+.mkt-inline-launch .mkt-p-lbl { margin: 16px 0; }
+.mkt-inline-launch .mkt-p-lbl-t { margin-bottom: 6px; }
+.mkt-inline-launch > .mkt-brief { margin: 20px 0; border: 0; background: none; }
+.mkt-inline-launch > .mkt-cta-main { width: 100%; margin-top: 8px; }
+.mkt-library-more { margin: 22px 6px 0; color: var(--ph-dim); }
+.mkt-library-more > summary { cursor: pointer; padding: 10px 0; }
+
+/* The expanded recipe area is a small editor, with one purpose visible at a time. */
+.mkt-recipe-detail-tabs { display: flex; gap: 4px; padding: 4px; margin-top: 14px;
+  border: 1px solid var(--ph-faint); border-radius: 7px; background: rgba(0,0,0,.16); }
+.mkt-recipe-detail-tabs button { flex: 1; font: inherit; font-size: 13px; padding: 9px 6px;
+  color: var(--ph-dim); background: transparent; border: 1px solid transparent; border-radius: 5px; cursor: pointer; }
+.mkt-recipe-detail-tabs button[aria-selected="true"] { color: var(--ph-bright); border-color: var(--ui-edge);
+  background: var(--ui-face); box-shadow: inset 0 1px 0 var(--ui-highlight); }
+.mkt-recipe-detail-tabs button:focus-visible { outline: 2px solid var(--ph); outline-offset: 2px; }
+.mkt-recipe-detail-panel { padding: 16px 2px 6px; }
+.mkt-recipe-detail-panel[hidden] { display: none; }
+.mkt-detail-note { margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: var(--ph-dim); }
+.mkt-recipe-detail-panel .mkt-intake { margin: 18px 0; gap: 10px; }
+.mkt-recipe-detail-panel .mkt-lbl-hint { display: block; margin-top: 5px; font-size: 12px; }
+.mkt-recipe-detail-panel .mkt-sop-steps { padding-left: 22px; margin: 8px 0; }
+.mkt-recipe-detail-panel .mkt-sop-steps li { padding: 7px 0 7px 5px; font-size: 14px; line-height: 1.5; }
+.mkt-recipe-detail-panel .mkt-sop-steps li::marker { color: var(--ph-dim); }
+.mkt-recipe-instructions { border-top: 1px solid var(--ph-faint); padding-top: 12px; }
+.mkt-recipe-instructions pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px;
+  line-height: 1.65; color: var(--text); padding: 12px; background: rgba(0,0,0,.15); border-radius: 6px; }
+.mkt-reuse-actions, .mkt-reuse-actions .mkt-cta-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.mkt-reuse-actions { flex-direction: column; align-items: flex-start; }
+
+.mkt-recipe-detail-panel .mkt-sop-steps li { background: none; border: 0; box-shadow: none; }
+.mkt-recipe-detail-panel .mkt-sop-steps li::before { content: none; }
+
+/* Recruitment uses the same glass selection language as Recipes. */
+.mkt-agents .mkt-rows .mkt-card {
+  grid-template-columns: 42px minmax(0, 1fr); gap: 12px; padding: 14px 12px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: linear-gradient(135deg, rgba(var(--ph-rgb), .06), rgba(var(--ph-rgb), .015));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .04);
+}
+.mkt-agents .mkt-rows .mkt-card:hover,
+.mkt-agents .mkt-rows .mkt-card.sel {
+  border-color: rgba(var(--ph-rgb), .3);
+  background: linear-gradient(125deg, rgba(var(--ph-bright-rgb), .14), rgba(var(--ph-rgb), .07) 48%, rgba(var(--ph-rgb), .025));
+  box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb), .2), inset 0 -1px 0 rgba(var(--ph-rgb), .08), 0 5px 18px rgba(0,0,0,.12);
+  backdrop-filter: blur(12px);
+}
+.mkt-agents .mkt-rows .mkt-card .mkt-coin { --coin: 42px; }
+.mkt-agents .mkt-card-side { display: none; }
+.mkt-agents .mkt-rows .mkt-card .mkt-tag { line-height: 1.4; }
+
+.mkt-agents .mkt-agent-simple { padding-top: 24px; }
+.mkt-agents .mkt-dos-hero { border: 0; margin: 0; padding: 0; }
+.mkt-agents .mkt-about { margin: 12px 0 20px; }
+.mkt-agents .mkt-config { border: 0; background: none; box-shadow: none; margin: 0; overflow: visible; }
+.mkt-agents .mkt-recruit-identity { padding: 0 0 16px; align-items: center; }
+.mkt-agents .mkt-config .mkt-modelbar { border: 0; padding: 0; }
+.mkt-agents .mkt-config .mkt-skinbar { padding: 0; }
+.mkt-agent-reference { font-size: 14px; line-height: 1.6; color: var(--text); }
+.mkt-agent-purpose { margin: 0 0 18px; }
+.mkt-agent-reference .bh { color: var(--ph-dim); font-size: 11px; letter-spacing: 1px; }
+.mkt-agent-examples { list-style: none; margin: 8px 0 20px; padding: 0; }
+.mkt-agent-examples li { padding: 10px 0; border-bottom: 1px solid var(--ph-faint); }
+.mkt-agents .mkt-cta-second { margin-top: 20px; border-top: 1px solid var(--ph-faint); padding-top: 14px; }
+.mkt-stage.form .mkt-class-editor { max-width: 980px; }
+.mkt-class-columns { display: grid; grid-template-columns: 250px minmax(0,1fr); gap: 28px; }
+.mkt-class-icon-panel { min-width: 0; padding: 16px; border: 1px solid var(--ph-faint); border-radius: 8px; background: rgba(var(--ph-rgb),.035); }
+.mkt-class-editor .mkt-build-preview { display: flex; align-items: center; gap: 14px; margin: 0 0 18px; color: var(--ph-dim); }
+.mkt-class-icons { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; margin-bottom: 20px; }
+.mkt-class-icons button { font: inherit; color: var(--ph-dim); background: transparent; border: 1px solid var(--ph-faint); border-radius: 6px; padding: 8px 2px; cursor: pointer; }
+.mkt-class-icons button span { display: block; font-size: 10px; }
+.mkt-class-icons button span:first-child { font-size: 25px; margin-bottom: 5px; color: var(--ph); }
+.mkt-class-icons button:hover, .mkt-class-icons button[aria-pressed="true"] { background: var(--ui-face); border-color: var(--ph); box-shadow: inset 0 1px 0 var(--ui-highlight); }
+.mkt-class-icons button:focus-visible { outline: 2px solid var(--ph); outline-offset: 2px; }
+.mkt-class-editor .mkt-lbl { margin: 16px 0 8px; gap: 7px; font-size: 14px; letter-spacing: .3px; }
+.mkt-class-editor .mkt-recipe-detail-tabs { margin-top: 0; }
+.mkt-class-editor .mkt-in { width: 100%; box-sizing: border-box; }
+.mkt-class-editor .mkt-kitpick { padding: 10px 0; border-bottom: 1px solid var(--ph-faint); }
+.mkt-class-editor #mkt-b-skills { max-height: 220px; overflow-y: auto; padding: 4px; }
+.mkt-class-editor #mkt-b-skills [hidden] { display: none; }
+.mkt-class-editor .mkt-save-acts { position: sticky; bottom: 0; padding: 16px 0; background: var(--panel); border-top: 1px solid var(--ph-faint); }
+@container (max-width: 680px) { .mkt-class-columns { grid-template-columns: minmax(0,1fr); gap: 18px; } .mkt-class-icons { grid-template-columns: repeat(8,minmax(0,1fr)); } }

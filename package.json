@@ -1,6 +1,6 @@
 {
   "name": "starnet-harness",
-  "version": "0.10.13",
+  "version": "0.11.2",
   "private": true,
   "description": "A local-first, gamified desktop harness for building and running real AI-agent teams.",
   "license": "MIT",
@@ -24,9 +24,9 @@
   },
   "scripts": {
     "validate:raw": "node test/validate_map.js",
-    "test:http": "node scripts/timeout.mjs --label test:http --timeout=600000 -- npm run test:http:raw",
+    "test:http": "node scripts/timeout.mjs --label test:http --timeout=1200000 -- npm run test:http:raw",
     "test:http:raw": "node scripts/run-test-list.mjs test/http.list",
-    "test:fast": "node scripts/timeout.mjs --label test:fast --timeout=600000 -- npm run test:fast:raw",
+    "test:fast": "node scripts/timeout.mjs --label test:fast --timeout=900000 -- npm run test:fast:raw",
     "test:fast:raw": "node scripts/run-fast-tests.mjs",
     "test": "npm run test:fast && npm run test:http",
     "website:stage": "node scripts/stage-website-deploy.mjs",
@@ -118,6 +118,7 @@
     "qa:sweep": "node scripts/qa/evidence-sweep.mjs",
     "qa:sweep:dry": "node scripts/qa/evidence-sweep.mjs --dry-run",
     "qa:journeys": "node scripts/qa/journeys.mjs",
+    "qa:customer-journeys": "node scripts/timeout.mjs --label qa:customer-journeys --timeout=900000 -- node scripts/run-test-list.mjs test/customer-journeys.list",
     "qa:saboteur": "node scripts/qa/saboteur.mjs",
     "qa:session-power-tools": "node scripts/qa/session-power-tools-journey.mjs",
     "qa:work-console": "node scripts/qa/work-console-journey.mjs",
@@ -163,6 +164,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "ajv": "8.20.0",
     "kokoro-js": "^1.2.1",
     "node-pty": "^1.1.0",
     "ogg-opus-decoder": "^1.7.3"

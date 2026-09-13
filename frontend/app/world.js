@@ -14,6 +14,9 @@
 'use strict';
 
 const World = (() => {
+  const sceneRenderer = typeof WorldRenderer !== 'undefined' ? WorldRenderer.create() : null;
+  let shadowReceiverGeo = null, shadowReceiverPath = null;
+  let propShadowLayer = null;
   let T = 12;
 
   /* ---------- station + bake cache ---------- */
@@ -51,11 +54,14 @@ const World = (() => {
               margin. The cost is ~11% of edge content, never any change to the curvature.
      Both feed the GL path and the CPU LUT path IDENTICALLY — drawCurveGL's probe compares the two and defects
      to CPU on divergence, so they must never drift apart. */
-  const CRT = { scan: 0.43, pitch: 1, fade: 0.25, glow: 0.07, curve: 0.09, vig: 0.30, over: 1.20, dust: 0.5, aberr: 0.35, grain: 0.24 };
+  const CRT = { scan: 0.38, pitch: 1, fade: 0.25, glow: 0.13, curve: 0.09, vig: 0.30, over: 1.20, dust: 0.5, aberr: 0.2, grain: 0.16, bloom: 0.25, emit: 0.9, mask: 0, bleed: 0, roll: 0 };   // 2026-09-03 'old TV' pass (Andrew: "90s Bandersnatch vibes"): pitch-2 lines, an RGB phosphor mask, colour bleed, more bow + vignette, a faint rolling sync bar. mask/bleed/roll = drawCRT   // bloom = phosphor bloom strength (drawBloom) · emit = prop light-source strength (drawPropLights)
+  CRT.film = 0;
+  if (typeof WorldRenderer !== 'undefined' && WorldRenderer.enabled()) Object.assign(CRT, WorldRenderer.PHOSPHOR);
   let _warpCv = null, _warpCtx = null;   // the barrel-warp snapshot buffer — see drawCurve()
   let _lut = null, _lutKey = '', _outImg = null;   // CPU per-pixel barrel-warp inverse-map LUT + output buffer — see buildLUT()/drawCurveCPU()
   let _gl = null, _glc = null, _glProg = null, _glTex = null, _glKLoc = null, _glAberrLoc = null, _glVigLoc = null, _glOverLoc = null, _glReady = false, _glFailed = false;   // GPU barrel-warp (WebGL) — see initGL()/drawCurveGL()
   let _glProbeOk = false, _glProbeTries = 0, _glProbeSkip = 0, _glProbeClean = 0, _glProbeCv = null;   // one-time GL output sanity probe — see drawCurveGL()
+  let _glSharpLoc = null, _glInvWLoc = null, _glInvHLoc = null;
   function glContextLost(gl) {
     try { return !!(gl && typeof gl.isContextLost === 'function' && gl.isContextLost()); }
     catch (_) { return true; }   // an unreadable context is no safer to blit than a proven-lost one
@@ -574,6 +580,7 @@ const World = (() => {
     propFoot = new Map(); pendingMourn = null;          // forget where things stood (no cross-station grief)
     agentDecor.length = 0; ownPlaced.clear(); placeCd = 0;   // forget which decor it placed (the new floor is a clean slate)
     if (agent && agent.fond) agent.fond.clear();        // forget the old floor's haunts — the new floor earns its own
+    for (const b of crew) if (!b.summoned) seizeFromIdle(b);
     crew = crew.filter(b => b.summoned);                // drop plan-derived crew (rebuilt from the new floor's bays); KEEP summoned crew (app-level, not floor-bound)
     if (station && station.onChange) unsub = station.onChange(() => { geoDirty = true; });
     rederive();
@@ -582,6 +589,7 @@ const World = (() => {
   function rederive() {
     if (!station) return;
     const next = station.projectGeometry();
+    const previousGeo = geo;
     const oldOrigin = geo ? geo.origin : null;
     geo = next; T = geo.TILE;
     computeOkCache.clear();        // G0.7: placements changed — re-answer "can this agent's room actually run?"
@@ -601,6 +609,8 @@ const World = (() => {
       // reads "belt pulled out" next tick and sinks paid work mid-ride (audit #4, 2026-08-11)
       if (convey && convey.shiftFrame) convey.shiftFrame(oldOrigin.tx - geo.origin.tx, oldOrigin.ty - geo.origin.ty);
       for (const b of crew) {
+        invalidateRefitLeisure(b, previousGeo, geo);
+        b.workRetryAt = 0;
         if (cdx || cdy) {
           b.px += cdx; b.py += cdy;
           b.seatPx += cdx; b.seatPy += cdy;
@@ -622,7 +632,7 @@ const World = (() => {
         if (agent.state === 'walk') { agent.state = 'idle'; agent.idleUntil = 0; }  // target's gone — never leave the agent stuck in the walk pose, or it moonwalks in place forever (tick's idle re-decision is gated on state!=='walk')
         if (agent.goal === 'use' || agent.goal === 'lounge' || agent.goal === 'inspect' || agent.goal === 'watch' || agent.goal === 'tend' || agent.goal === 'gaze' || agent.goal === 'quirk' || agent.goal === 'stare' || agent.goal === 'place' || agent.goal === 'rounds' || agent.goal === 'post' || agent.goal === 'sleep' || agent.goal === 'mourn' || agent.goal === 'revisit' || agent.goal === 'firstwake') { releaseSeat(); agent.goal = null; agent.usingProp = null; agent.watchProp = null; agent.studyKey = null; agent.quirkKind = null; agent.placeTarget = null; agent.removeId = null; agent.roundsQueue = null; agent.wakePhase = 0; agent.glanceCd = 0; agent.sitting = false; }  // the prop/belt list may have changed — drop leisure/observation/quirk/placement/rounds/board-survey/sleep/grief/wake-ritual, re-decide next idle tick (firstWakeDone stays latched, so the ritual never re-arms)
         if (agent.goal === 'work' && !agent.working) agent.goal = null;  // was mid-walk to the desk — drop it so tick's summon logic re-paths in the new frame
-        if (agent.working && seat) { const f = seatFoot(seat); agent.px = f.x; agent.py = f.y; agent.dir = deskFace || 'north'; }  // follow the desk (work only — a lounging agent must NOT teleport to the desk)
+        if (agent.working) { agent.sitting = false; agent.workRetryAt = 0; }  // re-path to a moved desk on the next tick; never jump across a sealed boundary
         ensureAgentValid();
       }
     }
@@ -634,6 +644,9 @@ const World = (() => {
     if (geoDirty || !geo) rederive();
     if (!geo) return;
     cache = StationBake.bake(geo);
+    for (const d of cache.doorOccluders || []) {
+      if (d.image.addEventListener) d.image.addEventListener('contextlost', () => { bakeDirty = true; });
+    }
     bakeDirty = false;
     recordBakeProbe();
   }
@@ -894,12 +907,14 @@ const World = (() => {
     seat = { tx: dtx, ty: Math.min(dty + 1, z.y2), cx: dtx + 0.5 };   // 2-wide desk -> centre sits on the tile seam
     blocked.add(dtx + ',' + dty); blocked.add((dtx + 1) + ',' + dty);
   }
-  // walk the hero to its work seat (or snap onto it if unreachable) + enter the 'work' goal — the shared "now sit
+  // walk the hero to its work seat (wait in place if unreachable) + enter the 'work' goal — the shared "now sit
   // and work" step, reached EITHER straight from on-duty OR after the conveyor-fetch leg below.
   function goToSeat(now) {
     agent.goal = 'work';
     if (!seat || !setPathTo({ x: seat.tx, y: seat.ty })) {
-      if (seat) { const f = seatFoot(seat); agent.px = f.x; agent.py = f.y; agent.sitting = true; agent.working = true; agent.dir = deskFace || 'north'; }   // face the assigned desk (deskFace) when teleport-fallback seating
+      agent.pathPts = null; agent.target = null; agent.state = 'idle'; agent.sitting = false;
+      agent.working = true; agent.settleUntil = 0; agent.workRetryAt = now + 750;
+      // Keep real work visible while the floor is unreachable; retry without fabricating travel.
       return;
     }
     /* ALREADY STANDING ON THE SEAT TILE — sit down NOW instead of waiting for a walk that will never
@@ -915,6 +930,7 @@ const World = (() => {
        overseer then stood at its desk NOT working for the rest of a provably live run while COMMS and
        the crew panel both said WORKING (2026-07-27). Truthful telemetry cuts both ways: the world may
        no more assert idle over a live run than a panel may assert work over a dead one. */
+    agent.workRetryAt = 0;
     if (!agent.target) arrive(now);
   }
   // G4 feature 1: resolve WHERE the permission-blocked hero waits, honestly from the live floor. Reuses the
@@ -944,8 +960,38 @@ const World = (() => {
       nearestInZone
     });
   }
-  // ENTER the await state: the hero was just blocked on a permission.prompt. Stop working, stand, and (in tick)
-  // walk to the resolved wait anchor. Idempotent per prompt — a second prompt for the same promptId is a no-op.
+  // Crew approvals are tracked by prompt ID; a waiting body holds position until its last prompt clears.
+  function crewIsAwaiting(b) { return !!(b && b.pendingApprovals && b.pendingApprovals.size); }
+  function enterCrewAwait(p) {
+    const b = p && bodyForAgent(p.agentId);
+    if (!b || b === agent || !p.promptId) return;
+    if (!b.pendingApprovals) b.pendingApprovals = new Map();
+    const now = performance.now();
+    if (!crewIsAwaiting(b)) b.awaitResumeWork = !!b.working;
+    b.pendingApprovals.set(p.promptId, { at: now, runId: p.runId || null });
+    seizeFromIdle(b);
+    b.working = false; b.sitting = false; b.goal = 'awaiting'; b.state = 'idle';
+    b.target = null; b.pathPts = null;
+    if (b.say && /working|on it/.test(b.say.text || '')) b.say = { text: '', until: 0 };
+  }
+  function clearCrewAwait(b, promptId, resume) {
+    if (!crewIsAwaiting(b)) return;
+    if (promptId) b.pendingApprovals.delete(promptId); else b.pendingApprovals.clear();
+    if (crewIsAwaiting(b)) return;
+    b.working = resume !== false && !!b.awaitResumeWork && (b.workUntil > performance.now() || agentRunsLive(b.agentId) > 0);
+    b.awaitResumeWork = false;
+    if (b.goal === 'awaiting') { b.goal = null; b.state = 'idle'; b.idleUntil = 0; }
+    b.workRetryAt = 0;
+  }
+  function reconcileCrewAwaits(prompts) {
+    for (const p of prompts) if (p && p.agentId && p.promptId) enterCrewAwait(p);
+    for (const b of crew) if (crewIsAwaiting(b)) {
+      const live = new Set(prompts.filter(p => p && p.agentId === b.agentId).map(p => p.promptId));
+      for (const id of Array.from(b.pendingApprovals.keys())) if (!live.has(id)) clearCrewAwait(b, id, true);
+    }
+  }
+
+  // The lead keeps its established walk-to-wait-anchor behavior.
   function enterAwait(prompt) {
     if (!agent || agent.unplaced) return;
     if (awaitPrompt && prompt && awaitPrompt.promptId === prompt.promptId) return;
@@ -1173,6 +1219,12 @@ const World = (() => {
           .catch(() => {});
       }
     } catch (e) {}
+    if (typeof IndustrialTextures !== 'undefined') IndustrialTextures.ready.then(() => {
+      if (IndustrialTextures.enabled()) {
+        Object.assign(CRT, { scan: .05, grain: .07, dust: .10, film: .12, curve: .02 });
+        bakeDirty = true; redrawNow();
+      }
+    });
     window.addEventListener('resize', resize);
 
     wireStageInput();
@@ -1228,7 +1280,9 @@ const World = (() => {
 
     cv.addEventListener('wheel', ev => {
       ev.preventDefault();
-      const c = toCanvas(ev), wx = (c.x - panX) / scale, wy = (c.y - panY) / scale;
+      const c = uncurvePoint(toCanvas(ev));
+      if (!c) return;
+      const wx = (c.x - panX) / scale, wy = (c.y - panY) / scale;
       scale = clampz(scale * Math.exp(-ev.deltaY * 0.0015), MINZ, MAXZ);
       panX = c.x - wx * scale; panY = c.y - wy * scale;
       camLerp = null; camLock = null; camUserAt = performance.now();   // the user is driving the camera — stop any focus ease, release any follow-lock, reset the cinecam idle clock
@@ -1250,6 +1304,7 @@ const World = (() => {
         cv.style.cursor = 'grabbing'; return;
       }
       const wp = toWorld(ev);
+      if (!wp) { hoverAgent = null; hoverBeltTile = null; hoverOutbox = null; cv.style.cursor = 'default'; return; }
       const nowMs = performance.now();
       // D4: stamp cursorMoveT only on a REAL displacement (> ~half a tile) — a parked-but-jittering cursor is
       // presence (feeds gaze), not "moving" (which lures THE CHASE). Compared against the PREVIOUS lastCursor.
@@ -1271,6 +1326,7 @@ const World = (() => {
       const wasDrag = drag && drag.moved; drag = null; cv.style.cursor = 'default';
       if (wasDrag) return;
       const wp = toWorld(ev);
+      if (!wp) return;
       // Every body that raises the agent hover nameplate is also a real dossier target. Pass its stable
       // roster id through the click seam so a specialist opens ITS dossier instead of falling through or
       // reusing the Overseer's index. The greeting remains hero-only: crew clicks open a panel, not a hero line.
@@ -1556,7 +1612,35 @@ const World = (() => {
     const r = cv.getBoundingClientRect();
     return { x: (ev.clientX - r.left) * (cv.width / r.width), y: (ev.clientY - r.top) * (cv.height / r.height) };
   }
-  function toWorld(ev) { const c = toCanvas(ev); return { x: (c.x - panX) / scale, y: (c.y - panY) / scale }; }
+  // Output pixel -> pre-CRT scene pixel. Match the renderer's six-step inverse,
+  // including overscan, BEFORE undoing the camera. Drag deltas remain screen-space.
+  function uncurvePoint(c) {
+    if (CRT.curve <= 0 || document.body.classList.contains('no-scan')) return c;
+    const hw = cv.width / 2, hh = cv.height / 2, over = overAmt(), k = Math.max(0, +CRT.curve || 0);
+    const nx = (c.x - hw) / hw / over, ny = (c.y - hh) / hh / over;
+    const ro = Math.hypot(nx, ny);
+    let rs = ro;
+    if (ro > 1e-6) for (let it = 0; it < 6; it++) {
+      const g = rs * (1 - k * rs * rs) - ro, dg = 1 - 3 * k * rs * rs;
+      if (Math.abs(dg) < 1e-9) break;
+      rs -= g / dg;
+    }
+    const s = ro > 1e-6 ? rs / ro : 1;
+    const x = hw + nx * s * hw, y = hh + ny * s * hh;
+    // The shader paints black outside the source image: that glass cannot hit a body.
+    return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x < cv.width && y >= 0 && y < cv.height ? { x, y } : null;
+  }
+  function curvePoint(c) {
+    if (CRT.curve <= 0 || document.body.classList.contains('no-scan')) return c;
+    const hw = cv.width / 2, hh = cv.height / 2;
+    const nx = (c.x - hw) / hw, ny = (c.y - hh) / hh;
+    const f = (1 - Math.max(0, +CRT.curve || 0) * (nx * nx + ny * ny)) * overAmt();
+    return { x: hw + nx * f * hw, y: hh + ny * f * hh };
+  }
+  function toWorld(ev) {
+    const c = uncurvePoint(toCanvas(ev));
+    return c ? { x: (c.x - panX) / scale, y: (c.y - panY) / scale } : null;
+  }
   // the nearest PLACED body under the cursor — the hero (Overseer) OR any crew/summoned body —
   // returned as the body itself (so the hover nameplate can tag whichever one), else null.
   function agentHit(wp) {
@@ -1573,6 +1657,23 @@ const World = (() => {
   }
 
   /* ---------- pathing + behaviour ---------- */
+  // A body may start between tile anchors after a pause or separation nudge.
+  // Reach its own foot anchor first if the first smoothed leg is unsafe from there.
+  function startBodyPath(b, pts) {
+    b.pathPts = pts; b.pathIdx = 0; b.state = 'walk';
+    if (pts && pts.length && geo && geo.clearFootSegment) {
+      const first = footOf(pts[0].x, pts[0].y);
+      if (!geo.clearFootSegment(b.px, b.py, first.x, first.y, blocked)) {
+        b.pathPts = [tileOf(b.px, b.py), ...pts];
+      }
+    }
+  }
+  function canRoundCorner(b) {
+    const next = b.pathPts && b.pathPts[b.pathIdx];
+    if (!next || !geo || !geo.clearFootSegment) return false;
+    const foot = footOf(next.x, next.y);
+    return geo.clearFootSegment(b.px, b.py, foot.x, foot.y, blocked);
+  }
   function setPathTo(dest) {
     self.pathPts = null; self.target = null; self.glance = null;
     if (!dest || !geo) return false;
@@ -1584,7 +1685,7 @@ const World = (() => {
     const p = geo.path(cur.x, cur.y, dest.x, dest.y, movementBlockers(self, beltUnion()))
       || geo.path(cur.x, cur.y, dest.x, dest.y, blockers);
     if (!p) return false;
-    self.pathPts = p; self.pathIdx = 0; self.state = 'walk';
+    startBodyPath(self, p);
     nextWaypoint();
     intentTell(dest);   // LEGIBILITY: an idle-life walk turns to face where it is going before the first step
     return true;
@@ -1629,6 +1730,7 @@ const World = (() => {
     // THE DOUBLE-TAKE (rare): stop and turn to look back the way it came, as if something caught its attention
     if (now >= (self.lookBackCd || 0) && U.chance(0.045 * (self.pers ? self.pers.curious : 1) * damp)) {
       self.pauseUntil = now + U.irnd(900, 1700); self.pauseLook = 'back';
+      self.pauseDir = OPP[self.dir] || self.dir;   // latch once; never reverse again on each held frame
       self.pauseCd = now + U.irnd(9000, 16000); self.lookBackCd = now + U.irnd(50000, 95000);
       armBeat(now);   // the double-take is a noticeable beat — count it against the station budget
       curiositySay(['hm?', '...', 'did something move', 'thought i saw something'], 0.22, now);
@@ -1818,7 +1920,7 @@ const World = (() => {
       if (tileBlockedFor(blockedLive, x, y)) continue;
       let p = geo.path(cur.x, cur.y, x, y, avoidLive);       // prefer a belt/body-free route
       if (!p) p = geo.path(cur.x, cur.y, x, y, blockedLive); // fall back: a belt bridges the only way across
-      if (p && p.length) { self.goal = null; self.pathPts = p; self.pathIdx = 0; self.state = 'walk'; nextWaypoint(); return; }
+      if (p && p.length) { self.goal = null; startBodyPath(self, p); nextWaypoint(); return; }
     }
     self.idleUntil = now + 800;
   }
@@ -2017,6 +2119,10 @@ const World = (() => {
     const nx = b.px + dx, ny = b.py + dy;
     const t = tileOf(nx, ny);
     if (!geo.walkable(t.x, t.y, blocked)) return false;   // would leave the floor / enter a blocking prop — drop the push
+    if (geo.clearFootSegment && !geo.clearFootSegment(b.px, b.py, nx, ny, blocked)) return false;
+    // A sideways shove must not turn the rest of an already-planned leg into
+    // a shortcut through the jamb on the following frame.
+    if (b.target && geo.clearFootSegment && !geo.clearFootSegment(nx, ny, b.target.x, b.target.y, blocked)) return false;
     b.px = nx; b.py = ny;
     return true;
   }
@@ -2110,26 +2216,35 @@ const World = (() => {
   function stepCrewToSeat(b, s, dt, now) {
     const foot = seatFoot(s);
     if (Math.hypot(foot.x - b.px, foot.y - b.py) < 1.1) {   // arrived → sit at the desk
-      b.px = foot.x; b.py = foot.y; b.pathPts = null; b.target = null; b.state = 'idle'; b.sitting = true; b.dir = 'north';
+      b.px = foot.x; b.py = foot.y; b.pathPts = null; b.target = null; b.state = 'idle'; b.sitting = true; b.dir = s.face || 'north'; b.workRetryAt = 0;
       return;
     }
     if (!b.target) {   // plot a fresh path to the chair tile
+      if (now < (b.workRetryAt || 0)) return;
       const cur = tileOf(b.px, b.py);
       const blockers = movementBlockers(b, blocked);
       if (tileBlockedFor(blockers, s.tx, s.ty)) { b.state = 'idle'; b.sitting = false; return; }
       // prop awareness: prefer the machinery-avoiding route to the chair; fall back when it's the only way
       const p = geo.path(cur.x, cur.y, s.tx, s.ty, movementBlockers(b, beltUnion()))
         || geo.path(cur.x, cur.y, s.tx, s.ty, blockers);
-      if (p && p.length) { b.pathPts = p; b.pathIdx = 0; crewNextWaypoint(b); }
-      else { b.px = foot.x; b.py = foot.y; b.sitting = true; b.dir = 'north'; b.state = 'idle'; return; }   // unreachable → snap into the seat
+      if (p && p.length) { startBodyPath(b, p); crewNextWaypoint(b); }
+      else if (!p) { b.pathPts = null; b.target = null; b.sitting = false; b.state = 'idle'; b.workRetryAt = now + 750; return; }
+      else { b.target = foot; }   // same tile: walk the remaining fraction to the centred seat
     }
     if (b.target) {
-      const dx = b.target.x - b.px, dy = b.target.y - b.py, d = Math.hypot(dx, dy);
-      const more = !!(b.pathPts && b.pathIdx < b.pathPts.length);
+      let dx = b.target.x - b.px, dy = b.target.y - b.py, d = Math.hypot(dx, dy);
+      let more = !!(b.pathPts && b.pathIdx < b.pathPts.length);
+      // Consume reached corners in this frame, then spend its movement step on the next leg.
+      while (more && (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(b)))) {
+        crewNextWaypoint(b);
+        dx = b.target.x - b.px; dy = b.target.y - b.py; d = Math.hypot(dx, dy);
+        more = !!(b.pathPts && b.pathIdx < b.pathPts.length);
+      }
       // CORNER LOOKAHEAD: hand over to the next waypoint EARLY, and — critically — do NOT snap onto it.
       // The old code teleported px/py exactly onto every waypoint, which is what made the body pivot on the
-      // spot at each tile. Only the FINAL waypoint still snaps, so an arrival settles on an exact position.
-      if (d < (more ? CORNER_LOOK : 1.1)) {
+      // spot at each tile. Keep that lookahead only when the new leg is clear;
+      // tight doorways must reach the waypoint before turning.
+      if (more ? (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(b))) : d < 1.1) {
         if (more) crewNextWaypoint(b);
         else { b.px = b.target.x; b.py = b.target.y; b.target = null; }
       } else {
@@ -2181,11 +2296,19 @@ const World = (() => {
     if (self.target) {
       if (now < (self.pauseUntil || 0)) {
         self.state = 'idle';                                // a deliberate hold mid-walk (maybeStrollBeat's considered pause / double-take)
-        if (self.pauseLook === 'back') self.dir = OPP[self.dir] || self.dir;
+        if (self.pauseLook === 'back') self.dir = self.pauseDir;
       } else {
-        const dx = self.target.x - self.px, dy = self.target.y - self.py, d = Math.hypot(dx, dy);
-        const more = !!(self.pathPts && self.pathIdx < self.pathPts.length);
-        if (d < (more ? CORNER_LOOK : 1.1)) {   // early hand-over, no snap — see stepCrewToSeat's note
+        let dx = self.target.x - self.px, dy = self.target.y - self.py, d = Math.hypot(dx, dy);
+        let more = !!(self.pathPts && self.pathIdx < self.pathPts.length);
+        // Consume reached corners in this frame, then spend its movement step on the next leg.
+        while (more && (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(self)))) {
+          nextWaypoint();
+          dx = self.target.x - self.px; dy = self.target.y - self.py; d = Math.hypot(dx, dy);
+          more = !!(self.pathPts && self.pathIdx < self.pathPts.length);
+          if (now < (self.pauseUntil || 0)) break;
+        }
+        if (now < (self.pauseUntil || 0)) { self.state = 'idle'; }
+        else if (more ? (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(self))) : d < 1.1) {   // early hand-over, no snap — see stepCrewToSeat's note
           if (more) nextWaypoint();
           else { self.px = self.target.x; self.py = self.target.y; arrive(now); }
         } else {
@@ -2252,6 +2375,7 @@ const World = (() => {
     for (const b of crew) {
       if (b.unplaced) continue;
       containBody(b, now);   // never step (or render) a body that is off the floor
+      if (crewIsAwaiting(b)) { b.working = false; b.sitting = false; b.target = null; b.pathPts = null; b.goal = 'awaiting'; b.state = 'idle'; continue; }
       if (b.working) {                                 // running → sit at its desk if it has one, else stand where work is delivered
         const dp = deskPropFor(b.agentId), s = dp ? deskSeat(dp) : null;
         if (s) stepCrewToSeat(b, s, dt, now);
@@ -2377,6 +2501,19 @@ const World = (() => {
     // resolved at all (a roomless single-agent floor, where the sole floor prop unambiguously granted the tool).
     if (room) { return cands.find(p => roomOfLocalTile(p.x, p.y) === room) || null; }
     return cands[0];
+  }
+
+  // A refit invalidates a furniture trip, or a perch whose prop moved/disappeared.
+  // Compare WORLD coordinates so growing the station does not evict an unchanged sitter.
+  function invalidateRefitLeisure(b, before, after) {
+    const ids = [b.usingProp, b.watchProp, b.seatKey && b.seatKey.split(':')[0]].filter(Boolean);
+    if (!ids.length) return;
+    const changed = ids.some(id => {
+      const p = before && before.props.find(p => p.id === id), q = after.props.find(p => p.id === id);
+      return !p || !q || p.t !== q.t || p.w !== q.w || p.h !== q.h || (p.r || 0) !== (q.r || 0) || !!p.m !== !!q.m
+        || p.x + before.origin.tx !== q.x + after.origin.tx || p.y + before.origin.ty !== q.y + after.origin.ty;
+    });
+    if (b.target || changed) { seizeFromIdle(b); b.sitting = false; b.state = 'idle'; }
   }
 
   /* free this agent's claimed seat (idempotent) and drop the on-couch render offset */
@@ -5511,6 +5648,7 @@ const World = (() => {
       // reached the conveyor → now head to the workstation and work
       else if (agent.goal === 'fetch' && agent.state !== 'walk' && (!agent.pathPts || agent.pathIdx >= agent.pathPts.length)) goToSeat(now);
     }
+    if (!awaitPrompt && activity === 'task' && agent.goal === 'work' && !agent.sitting && !agent.target && now >= (agent.workRetryAt || 0)) goToSeat(now);
     if (activity !== 'task' && (agent.goal === 'work' || agent.goal === 'summon' || agent.goal === 'fetch')) {
       agent.goal = null; agent.sitting = false; agent.working = false; agent.thinkUntil = 0; agent.settleUntil = 0; agent.pathPts = null; agent.target = null; agent.state = 'idle'; agent.idleUntil = now + 200; agent.lastTaskAt = now; agent.taskViaConveyor = false;   // just finished real work → relaxed, downtime clock resets
     }
@@ -5543,12 +5681,20 @@ const World = (() => {
       if (now < (agent.pauseUntil || 0)) {
         // a deliberate hold mid-walk: stand, and (for a look-back / yield) turn toward what stopped it
         agent.state = 'idle';
-        if (agent.pauseLook === 'back') agent.dir = OPP[agent.dir] || agent.dir;
+        if (agent.pauseLook === 'back') agent.dir = agent.pauseDir;
         else if (agent.pauseLook === 'cargo') { const b = nearestBox(); if (b) agent.dir = dirToward(agent.px, agent.py, b.x, b.y); }
       } else {
-        const dx = agent.target.x - agent.px, dy = agent.target.y - agent.py, d = Math.hypot(dx, dy);
-        const more = !!(agent.pathPts && agent.pathIdx < agent.pathPts.length);
-        if (d < (more ? CORNER_LOOK : 1.1)) {   // early hand-over, no snap — see stepCrewToSeat's note
+        let dx = agent.target.x - agent.px, dy = agent.target.y - agent.py, d = Math.hypot(dx, dy);
+        let more = !!(agent.pathPts && agent.pathIdx < agent.pathPts.length);
+        // Consume reached corners in this frame, then spend its movement step on the next leg.
+        while (more && (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(agent)))) {
+          nextWaypoint();
+          dx = agent.target.x - agent.px; dy = agent.target.y - agent.py; d = Math.hypot(dx, dy);
+          more = !!(agent.pathPts && agent.pathIdx < agent.pathPts.length);
+          if (now < (agent.pauseUntil || 0)) break;
+        }
+        if (now < (agent.pauseUntil || 0)) { agent.state = 'idle'; }
+        else if (more ? (d < 1e-6 || (d < CORNER_LOOK && canRoundCorner(agent))) : d < 1.1) {   // early hand-over, no snap — see stepCrewToSeat's note
           if (more) nextWaypoint();
           else { agent.px = agent.target.x; agent.py = agent.target.y; arrive(now); }
         } else {
@@ -5657,6 +5803,84 @@ const World = (() => {
 
   let linkStaleDim = false;   // E1: set once per frame — dims the live-telemetry draws when the SSE bridge is down
   let lastTtlSweepAt = 0;     // E2: throttle the paired-state TTL sweep to once per second (never per-frame)
+  // Conservative render-only culling. Keep a generous margin for raised bodies,
+  // labels and projected shadows; state and light-source collection still run.
+  function propOnScreen(p) {
+    const x=p.x*T,y=p.y*T,w=(p.w||1)*T,h=(p.h||1)*T,pad=64;
+    return (x+w+pad)*scale+panX>=0 && (x-pad)*scale+panX<=cv.width &&
+      (y+h+pad)*scale+panY>=0 && (y-pad)*scale+panY<=cv.height;
+  }
+
+  function drawLitProp(p, work, live) {
+    PropSprites.draw(p, work, live);
+    if (!sceneRenderer || !PropSprites.canLightResponse || !PropSprites.canLightResponse(p)) return;
+    // Sample the physical footprint, not elevated sprite pixels inside the
+    // projected wall. The response stays in this item's existing depth slot.
+    const light = sceneRenderer.sampleLight((p.x + (p.w || 1) / 2) * T,
+      (p.y + (p.h || 1) * .65) * T);
+    PropSprites.drawLightResponse(p, light);
+  }
+
+  function paintPropShadows(g) {
+    g.save();
+    try {
+      g.setTransform(scale,0,0,scale,panX,panY);g.imageSmoothingEnabled=false;
+      if(typeof Path2D!=='undefined'&&geo&&geo.zoneGrid){
+        if(shadowReceiverGeo!==geo){
+          shadowReceiverGeo=geo;shadowReceiverPath=new Path2D();
+          for(let yy=0;yy<geo.ROWS;yy++)for(let xx=0;xx<geo.COLS;){
+            if(geo.zoneGrid[yy*geo.COLS+xx]==null){xx++;continue;}
+            const start=xx;while(xx<geo.COLS&&geo.zoneGrid[yy*geo.COLS+xx]!=null)xx++;
+            shadowReceiverPath.rect(start*T,yy*T,(xx-start)*T,T);
+          }
+        }
+        g.clip(shadowReceiverPath);
+      }
+      PropSprites.setCtx(g);
+      if(geo&&geo.props)for(const p of geo.props)if(propOnScreen(p))PropSprites.drawShadow(p,station&&station.mountOf?station.mountOf(p):null);
+      if(desk&&!deskPropId)PropSprites.drawShadow({t:'desk',x:desk.tx,y:desk.ty,w:desk.w,h:desk.h},null);
+    } finally {g.restore();PropSprites.setCtx(ctx);}
+  }
+
+  function drawPropShadows() {
+    if(typeof PropSprites==='undefined'||!PropSprites.drawShadow)return;
+    if(!propShadowLayer){
+      const image=document.createElement('canvas'),g=image.getContext('2d');
+      if(!g){paintPropShadows(ctx);return;}
+      propShadowLayer={image,g,stamp:null};
+      image.addEventListener('contextlost',()=>{propShadowLayer=null;},{once:true});
+    }
+    const layer=propShadowLayer;
+    // Screen-resolution cache: no second resampling of the shaped shadows.
+    // Camera movement, edits, rebakes and the synthetic desk invalidate it.
+    const stamp=[scale,panX,panY,cv.width,cv.height,deskPropId,desk&&desk.tx,desk&&desk.ty,desk&&desk.w,desk&&desk.h].join('|');
+    if(layer.stamp!==stamp||layer.geo!==geo||layer.bake!==cache){
+      if(layer.image.width!==cv.width||layer.image.height!==cv.height){layer.image.width=cv.width;layer.image.height=cv.height;}
+      layer.g.clearRect(0,0,cv.width,cv.height);paintPropShadows(layer.g);
+      layer.stamp=stamp;layer.geo=geo;layer.bake=cache;
+    }
+    ctx.save();
+    try{ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(layer.image,0,0);}finally{ctx.restore();}
+  }
+
+  let cameraHudNodes = null, cameraHudAt = -Infinity;
+  function updateCameraHud(now) {
+    if (now - cameraHudAt < 250 || typeof WorldRenderer === 'undefined') return;
+    cameraHudAt = now;
+    if (!cameraHudNodes) {
+      const root = document.querySelector('.cam-hud'); if (!root) return;
+      cameraHudNodes = { root, label: root.querySelector('.cam-label'), rec: root.querySelector('.cam-rec'), feed: root.querySelector('.cam-feed') };
+    }
+    const subject = camLock ? bodyForAgent(camLock.id) : null;
+    const readout = WorldRenderer.cameraReadout({geo,
+      viewport: WorldRenderer.visibleRect({scale,panX,panY,width:cv.width,height:cv.height}),
+      subject: subject && !subject.unplaced ? {name:subject.name,px:bodyPosX(subject),py:bodyPosY(subject)} : null,
+      linked: !!chanES && chanES.readyState === 1 && !linkDown(now), paused: bridgePaused});
+    const n=cameraHudNodes;
+    for (const [node,text] of [[n.label,readout.label],[n.rec,readout.indicator],[n.feed,readout.feed]])
+      if(node && node.textContent!==text)node.textContent=text;
+    if(n.root.getAttribute('data-feed')!==readout.state)n.root.setAttribute('data-feed',readout.state);
+  }
   function frameBody(now) {
     const dt = Math.min(64, now - last); last = now; fnow = now;
     linkStaleDim = linkDown(now);   // recompute the honest link state before any telemetry is drawn this frame
@@ -5726,7 +5950,10 @@ const World = (() => {
         { x: 0, y: 0, w: cache.baseCv.width, h: cache.baseCv.height });
     }
 
-    ctx.drawImage(cache.baseCv, 0, 0);
+    if (sceneRenderer) {
+      sceneRenderer.begin({ geo, cache, now, scale, panX, panY, width: cv.width, height: cv.height, reducedMotion: reduceMotion() });
+      sceneRenderer.drawBase(ctx);
+    } else ctx.drawImage(cache.baseCv, 0, 0);
 
     // conveyor belts (floor machinery) + the live transport sim — local frame, under entities
     if (geo && geo.belts && typeof Conveyor !== 'undefined') {
@@ -5745,7 +5972,7 @@ const World = (() => {
       convey.drawBelts(ctx, now, T, geo.belts, beltLiveSet);
     }
 
-    const items = [], decals = [];   // decals = the flat floor pass, painted under every item (see isFlatProp)
+    const items = [], decals = [], propLights = [], bayLabels = [];   // decals = the flat floor pass, painted under every item (see isFlatProp) · propLights = this frame's emissive sources
     // placeable props (furniture) — drawn over the bake, y-sorted with agents, under the lightmap
     if (geo && geo.props && geo.props.length && typeof PropSprites !== 'undefined') {
       PropSprites.setCtx(ctx); PropSprites.setNow(now);
@@ -5800,11 +6027,16 @@ const World = (() => {
         if (p.t === 'bay' && p.agentId) {
           const db = bodyForAgent(p.agentId);
           if (db && db.name) dp = Object.assign(dp === p ? Object.assign({}, p) : dp, { dockName: db.name });
+          if (propOnScreen(dp)) bayLabels.push(dp);
         }
         // OCCUPIED BED: the base pass holds the quilt back so the sleeper can be drawn between the
         // frame and the covers (drawOver, below). Same copy-on-write idiom as the nameplate above.
         if (sleeper) dp = Object.assign(dp === p ? Object.assign({}, p) : dp, { sleeper: true });
-        items.push({ y: sy, draw: () => PropSprites.draw(dp, work, live) });
+        items.push({ y: sy, draw: () => { if (propOnScreen(dp)) drawLitProp(dp, work, live); } });
+        if (PropSprites.lightOf) {
+          const lt = PropSprites.lightOf(dp, work, reduceMotion());
+          if (lt) propLights.push(Object.assign({}, lt, { originX: (p.x + (p.w || 1) / 2) * T, originY: (p.y + (p.h || 1) / 2) * T }));
+        }
         // SEAT-FRONT SLIVER: a stool/chair's pad front rim redraws just IN FRONT of its (lifted) sitter,
         // so the body's lap tucks INTO the pad — the couch trick, at single-seat scale. Sorted a hair
         // past the body's own key (sitter.seatPy) and well short of the next tile row.
@@ -5834,7 +6066,7 @@ const World = (() => {
                   : (typeof PropSprites !== 'undefined' && PropSprites.has('chair')) ? 'chair' : null;
       if (seatT) {
         PropSprites.setCtx(ctx); PropSprites.setNow(now);
-        PropSprites.draw({ t: seatT, x: sx, y: ty, w: 1, h: 1 }, false);
+        drawLitProp({ t: seatT, x: sx, y: ty, w: 1, h: 1 }, false);
       } else F_chair(sx * T, ty * T);
     }
     if (desk && !deskPropId) items.push({ y: (desk.ty + desk.h) * T, draw: () => {   // skip the synthetic desk when a PLACED workstation prop is the hero's desk (the prop draws itself)
@@ -5844,9 +6076,13 @@ const World = (() => {
       const live = work ? { heat: heatFor(agent.id), prog: deskProgFor(agent.id) } : null;
       if (typeof PropSprites !== 'undefined' && PropSprites.has('desk')) {
         PropSprites.setCtx(ctx); PropSprites.setNow(now);
-        PropSprites.draw({ t: 'desk', x: desk.tx, y: desk.ty, w: desk.w, h: desk.h }, work, live);
+        drawLitProp({ t: 'desk', x: desk.tx, y: desk.ty, w: desk.w, h: desk.h }, work, live);
       } else F_desk(desk.tx * T, desk.ty * T, desk.w * T, desk.h * T, { x: desk.tx, work, heat: live ? live.heat : 0, prog: live ? live.prog : null });
     } });
+    if (desk && !deskPropId && typeof PropSprites !== 'undefined' && PropSprites.lightOf) {   // the auto-desk's CRT lights the deck while the hero works, like any placed workstation
+      const lt = PropSprites.lightOf({ t: 'desk', x: desk.tx, y: desk.ty, w: desk.w, h: desk.h }, !!(agent && agent.working), reduceMotion());
+      if (lt) propLights.push(Object.assign({}, lt, { originX: (desk.tx + desk.w / 2) * T, originY: (desk.ty + desk.h / 2) * T }));
+    }
     if (seat && !deskPropId) items.push({ y: (seat.ty + 1) * T, draw: () => drawSeatChair(seat.tx, seat.ty, seat.cx) });
   // a PLACED hero desk's chair is drawn by the workstation loop above; draw here only for the synthetic auto-desk
     /* a body dormant IN a bed sorts INSIDE its bed — after the frame + pillow, before the quilt — which
@@ -5859,23 +6095,51 @@ const World = (() => {
     };
     if (agent && !agent.unplaced) items.push(bodyItem(agent, rposY()));
     for (const b of crew) items.push(bodyItem(b, (b.seated ? b.seatPy : b.py)));   // the other agents, at their bays (seated → sort by the cushion pos like the hero's rposY, so a couch-lounging crew body tucks just behind the back-facing couch panel, head over the cap)
+    // A raised doorway stands in front of a body until its feet clear the wall.
+    // Use the baked surfaces in the same depth order as props and agents; leaving
+    // them only in baseCv made every body paint through the solid jambs.
+    for (const d of cache.doorOccluders || []) {
+      if ((d.x + d.w) * scale + panX < 0 || d.x * scale + panX > cv.width ||
+          (d.y + d.h) * scale + panY < 0 || d.y * scale + panY > cv.height) continue;
+      items.push({ y: d.sortY, draw: () => ctx.drawImage(d.image, d.x, d.y) });
+    }
     // THE FLOOR PASS — every decal, in doc order, before anything that stands on the deck. This is what
     // lets a body walk across a rug: the rug is already down when the sorted items paint over it.
     if (decals.length && typeof PropSprites !== 'undefined') {
       PropSprites.setCtx(ctx); PropSprites.setNow(now);
-      for (const p of decals) PropSprites.draw(p, false);
+      for (const p of decals) if (propOnScreen(p)) PropSprites.draw(p, false);
     }
-    items.sort((a, b) => a.y - b.y);
-    for (const it of items) it.draw();
+    /* THE SHADOW PASS — every standing prop's cast shadow, on the deck (over the rugs), before any item
+       paints. One pass rather than per-item so a shadow can never land on a neighbour's body: the props
+       and bodies are y-sorted and paint OVER this. The synthetic auto-desk casts one too. */
+    if (sceneRenderer) sceneRenderer.prepareLight(propLights, { ambient: StationBake.LIGHT.ambient, emission: CRT.emit });
+    drawPropShadows();
+    if (sceneRenderer) sceneRenderer.drawGrounding(ctx, [agent, ...crew].filter(b => b && !b.unplaced && !b.seated && !b.lying)
+      .map(b => ({ x: bodyPosX(b), y: bodyPosY(b), width: 7, height: 20, opacity: .16 })));
+    if (sceneRenderer) {
+      sceneRenderer.drawEntities(ctx, items);
+    } else {
+      items.sort((a, b) => a.y - b.y);
+      for (const it of items) it.draw();
+    }
     if (convey) convey.drawBoxes(ctx, now, T);   // boxes ride on top of the belts
     if (ghost) ghost.draw(ctx, now, T, 8);       // the projection + its WOULD-captions (NAG_FONT size)
     drawHandoffBoxes(now);   // Stage 2: lead→worker delegation boxes fly over the entities
     drawQueueJam(now);   // the live backlog as a physical jam of waiting crates at the INTAKE (world-space, under the lightmap)
     drawShippedPallet(now);   // SHIPPED TODAY: completed jobs stack as product crates at the OUTBOX (server-truth count)
 
-    ctx.drawImage(cache.lightCv, 0, 0);
-    drawGlows(now);
-    drawDust(now);   // Slice 3: tiny motes drifting through the light pools (world-space, additive, over the glows)
+    const nextLight = sceneRenderer && sceneRenderer.drawLight(ctx, propLights, { ambient: StationBake.LIGHT.ambient, emission: CRT.emit });
+    if (!nextLight) {
+      ctx.drawImage(cache.lightCv, 0, 0);
+      ctx.save();
+      try {
+        clipInteriorLight();
+        drawGlows(now);
+        drawPropLights(now, propLights);
+      } finally { ctx.restore(); }
+    }
+    drawNavLights(now);   // small running lights on validated exterior armour mounts
+    if (!(sceneRenderer && sceneRenderer.drawAtmosphere(ctx, { dust: CRT.dust }))) drawDust(now);
     drawDeskFlashes(now);   // G0.4/G0.8: red distress strobe over a desk whose run just died (additive, with the glows)
     drawAwakenLight(now);   // the soul kindling: ignition spark + a growing halo + motes (world-space additive, awakening only)
     // the AWAKENING veil — now a SPOTLIGHT on the newborn (center light, corners dark) that warms cold->dawn,
@@ -5903,23 +6167,31 @@ const World = (() => {
     // (the context-window gauge now lives engraved in the bottom bar — StationUI.ctxTick, not the desk)
     drawRunClocks(now);   // G0.2: the honest elapsed-time tag at every desk with a live run (world-space, over the lightmap)
     drawWorkGlyphs(now);  // stage-ticker STRETCH: the "▸ TOOL" tag at a desk with a real tool in flight (one line below the run clock)
-    drawAwaitTag(now);    // G4.1: the amber AWAITING APPROVAL tag over a permission-blocked hero
+    drawAwaitTag(now);    // the existing lead wait anchor
+    for (const b of crew) if (crewIsAwaiting(b)) drawAwaitTag(now, b);
     drawRoutingNags(now); // BELT LEGIBILITY: the compiled plan's errors as in-world callouts on the broken piece
+    if (bayLabels.length && PropSprites.drawBayNames) {
+      PropSprites.setCtx(ctx);
+      PropSprites.drawBayNames(bayLabels, scale, window.devicePixelRatio || 1);
+    }
     drawBeltHoverTag(now);// BELT LEGIBILITY: hover a belt tile → where does this line flow (a glance, never a window)
     drawOutboxHoverTag(now);// OUTBOX LEGIBILITY: hover the stacked chute → what the crates are + what a click does
     drawDockFlashes(now); // LONE-BAY dock arrival: the bay visibly catches work when no belt line exists
     drawPinFlourish(now); // G4.2: the amber pin-burst at the board the instant a proposal is pinned
     if (agent && !agent.unplaced) drawBubble(now);
-    for (const b of crew) drawBubble(now, b);   // crew speech bubbles (e.g. "received: …" when work routes to them)
+    for (const b of crew) drawBubble(now, b);   // crew speech and useful status messages
     if (hoverAgent && !hoverAgent.unplaced) drawNameplate(now, hoverAgent);
     // FLOOR-STATS OVERLAY REMOVED (2026-07-09 decision): the YIELD/RUNS/CACHE/SLAG/THRU/DWELL box no
     // longer floats over the world sim. The FloorStats engine stays live (event-fed) so any panel or
     // widget consumer keeps honest numbers — only the floating canvas readout is gone.
     if (linkStaleDim) drawLinkDown(now);   // E1: honest "the live telemetry is not live" marker in the chrome
     // (station growth headline now lives in the top bar's STATION chip — see xpstore.pushTopbar)
+    drawBloom(now); // phosphor bloom: the bright things in the frame haze outward (screen-space, before the warp so it bows with the picture)
     drawCurve(now); // barrel-warp the whole feed IN-CANVAS — the original (dot-matrix-era) curve, no dots
     drawCRT(now);   // scanlines + fade, painted in-canvas at device-px OVER the warped feed (no moiré)
     paintStageHeartbeat();   // the frame's last act: the one opaque pixel a dead stage context cannot fake (see watchStageLoss)
+    updateCameraHud(now);
+    if (sceneRenderer) sceneRenderer.finish();
     // NOTE: the next rAF is scheduled by the frame() crash-guard wrapper, BEFORE this body runs — never here.
   }
 
@@ -5956,41 +6228,101 @@ const World = (() => {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const dpr = window.devicePixelRatio || 1;
     const W = cv.width, H = cv.height;
+    /* COLOUR BLEED — the beam does not stop at a pixel edge; every bright edge smears a hair to the right.
+       The frame is drawn over itself shifted one device pixel, additively at a low alpha. One full-frame
+       draw (GPU-trivial), before the lines so they cut it too. CRT.bleed = strength (0 = off). */
+    if (CRT.bleed > 0.001) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = Math.min(1, CRT.bleed);
+      ctx.drawImage(cv, Math.max(1, Math.round(dpr)), 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
     if (CRT.scan > 0) {                               // soft neutral scanlines, drawn straight on top of the feed
       ctx.globalCompositeOperation = 'source-over';
       const sc = scanCanvas(CRT.scan, CRT.pitch, dpr);
       ctx.fillStyle = ctx.createPattern(sc, 'repeat'); ctx.fillRect(0, 0, W, H);
+    }
+    /* PHOSPHOR MASK — the aperture grille. A real tube is three phosphor stripes per triad, and the eye reads
+       that fine vertical RGB rhythm as "a screen" even when it cannot resolve it. A 3px-wide tile (R, G, B
+       columns at a low multiply) laid over the whole feed; at 4K it tightens to the device pixel like the
+       scanlines do. CRT.mask scales it (0 = off). */
+    if (CRT.mask > 0.001) {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = Math.min(1, CRT.mask);
+      ctx.fillStyle = ctx.createPattern(maskCanvas(dpr), 'repeat'); ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
+    /* THE ROLL BAR — the faint bright band that drifts down an old set every so often (a vertical-hold
+       hiccup). One soft horizontal gradient, additive, sweeping the frame over ~2.6s then absent for ~14s;
+       phase is derived from the clock so it needs no state. Steady under reduced motion. CRT.roll = strength. */
+    if (CRT.roll > 0.001 && !reduceMotion()) {
+      const PER = 16800, SWEEP = 2600, t = now % PER;
+      if (t < SWEEP) {
+        const y = (t / SWEEP) * (H + 80) - 40, hh = 34 * dpr;
+        const g = ctx.createLinearGradient(0, y - hh, 0, y + hh);
+        const a = (CRT.roll * 0.35).toFixed(3);
+        g.addColorStop(0, 'rgba(255,250,240,0)'); g.addColorStop(0.5, 'rgba(255,250,240,' + a + ')'); g.addColorStop(1, 'rgba(255,250,240,0)');
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = g; ctx.fillRect(0, y - hh, W, hh * 2);
+      }
+    }
+    if (CRT.film > 0) {
+      // A restrained density curve: mix C with C*C, so mids deepen while true
+      // black and emissive highlights stay intact. No gray lift or blurred copy.
+      // Shared after both warp paths, before grain; same-size self-blit is sharp.
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = Math.min(.5, CRT.film);
+      ctx.drawImage(cv, 0, 0);
+      ctx.globalAlpha = 1;
     }
     if (CRT.fade > 0) {                               // soft faded matte (cool-neutral, no yellow) — CRT.fade
       ctx.globalCompositeOperation = 'lighter';
       ctx.fillStyle = 'rgba(' + Math.round(11 * CRT.fade) + ',' + Math.round(12 * CRT.fade) + ',' + Math.round(15 * CRT.fade) + ',1)';
       ctx.fillRect(0, 0, W, H);
     }
-    if (CRT.grain > 0.001) {                          // FILM GRAIN — one cached noise tile, jittered per frame (CRT.grain)
-      // 'overlay' around mid-gray so grain modulates without lifting black levels; the tile is built
-      // ONCE and only its pattern offset changes each frame (a whole-number jitter derived from `now`,
-      // quantized to ~15fps so it reads as phosphor noise, not smooth scrolling texture).
-      const fi = Math.floor(now / 66);
-      const jx = (fi * 53) % 128, jy = (fi * 97) % 128;
+    const staticLevel = Number.isFinite(CRT.staticLevel) ? Math.max(0, Math.min(2, CRT.staticLevel)) : 1;
+    const grain = CRT.grain * staticLevel;
+    if (grain > 0.001) {
+      // Visible tube static: full-range, zero-centred noise. Overlay preserves
+      // black and mean scene density; its old narrow tile/low alpha rounded to
+      // almost nothing on this dark feed. Keep speckles at one CSS pixel so a
+      // high-DPI display does not average them away into an invisible finish.
+      const fi = reduceMotion() ? 0 : Math.floor(now / 66);
+      const jx = (fi * 53) % GRAIN_S, jy = (fi * 97) % GRAIN_S;
       ctx.globalCompositeOperation = 'overlay';
-      ctx.globalAlpha = Math.min(0.25, CRT.grain);
-      ctx.translate(jx, jy);
+      ctx.globalAlpha = Math.min(.65, grain);
+      ctx.setTransform(dpr, 0, 0, dpr, jx * dpr, jy * dpr);
       ctx.fillStyle = grainPattern();
-      ctx.fillRect(-jx, -jy, W, H);
+      ctx.fillRect(-jx, -jy, Math.ceil(W / dpr), Math.ceil(H / dpr));
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
     }
     ctx.globalCompositeOperation = 'source-over';
   }
-  // Cached 128px mid-gray noise tile for the film grain — built once, reused forever (only the
-  // draw offset animates). Mid-gray (128) is the 'overlay' neutral, so ±spread is pure texture.
+  // A larger tile avoids a visible repeat across the station. A triangular
+  // distribution keeps most speckles fine, with occasional stronger static.
+  // Its mean is the exact overlay neutral (127.5), so no fog layer is added.
+  const GRAIN_S = 512;
+  // the aperture-grille tile: R, G, B columns, each one device px wide, at mid-grey so 'multiply' only tints
+  let _maskCv = null, _maskKey = '';
+  function maskCanvas(dpr) {
+    const u = Math.max(1, Math.round(dpr)), key = 'm' + u;
+    if (_maskCv && _maskKey === key) return _maskCv;
+    const c = document.createElement('canvas'); c.width = 3 * u; c.height = 1;
+    const g = c.getContext('2d');
+    const cols = ['#ff9a9a', '#9aff9a', '#9a9aff'];
+    for (let i = 0; i < 3; i++) { g.fillStyle = cols[i]; g.fillRect(i * u, 0, u, 1); }
+    _maskCv = c; _maskKey = key;
+    return c;
+  }
   function grainPattern() {
     if (_grainPat) return _grainPat;
-    const S = 128;
+    const S = GRAIN_S;
     _grainCv = document.createElement('canvas'); _grainCv.width = S; _grainCv.height = S;
     const gctx = _grainCv.getContext('2d'), id = gctx.createImageData(S, S);
     for (let i = 0; i < S * S; i++) {
-      const v = 128 + Math.round((Math.random() - 0.5) * 110);
+      const v = Math.round((Math.random() + Math.random()) * 127.5);
       id.data[i * 4] = v; id.data[i * 4 + 1] = v; id.data[i * 4 + 2] = v; id.data[i * 4 + 3] = 255;
     }
     gctx.putImageData(id, 0, 0);
@@ -6005,8 +6337,9 @@ const World = (() => {
   // triangle mesh: a mesh draws the picture as thousands of triangles whose seams line up into the diagonal
   // stripes; a per-pixel remap has no triangles, so there are no seams and no diagonal lines. Curve is identical.
   // the two aperture knobs, clamped to sane ranges — read by BOTH warp paths so they can never disagree
-  function vigAmt() { const v = +CRT.vig; return Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0.30; }
-  function overAmt() { const o = +CRT.over; return Number.isFinite(o) && o >= 1 ? (o > 1.6 ? 1.6 : o) : 1; }
+  function vigAmt() { if (CRT.curve <= 0) return 0; const v = +CRT.vig; return Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0.30; }
+  function overAmt() { if (CRT.curve <= 0) return 1; const o = +CRT.over; return Number.isFinite(o) && o >= 1 ? (o > 1.6 ? 1.6 : o) : 1; }
+  function sharpAmt() { return typeof WorldRenderer !== 'undefined' ? Math.max(0, Math.min(.6, +CRT.sharpen || 0)) : 0; }
 
   function buildLUT(k, W, H) {
     const over = overAmt();
@@ -6036,8 +6369,8 @@ const World = (() => {
     _lut = lut; _lutKey = key;
   }
   function drawCurve(now) {
-    if (!cv || CRT.curve <= 0 || document.body.classList.contains('no-scan')) return;
-    const k = CRT.curve, W = cv.width, H = cv.height;
+    if (!cv || (CRT.curve <= 0 && !sharpAmt()) || document.body.classList.contains('no-scan')) return;
+    const k = Math.max(0, +CRT.curve || 0), W = cv.width, H = cv.height;
     if (!_glFailed && drawCurveGL(k, W, H)) return;   // GPU path (near-free); on any failure it flips _glFailed
     drawCurveCPU(k, W, H);                             // CPU fallback (per-pixel LUT) — identical look, heavier
   }
@@ -6059,7 +6392,8 @@ const World = (() => {
       if (!_gl) throw new Error('no webgl');
       const gl = _gl;
       const vs = 'attribute vec2 aPos; varying vec2 vUv; void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }';
-      const fs = 'precision highp float; varying vec2 vUv; uniform sampler2D uTex; uniform float uK; uniform float uAberr; uniform float uVig; uniform float uOver;\n' +
+      const fs = 'precision highp float; varying vec2 vUv; uniform sampler2D uTex; uniform float uK; uniform float uAberr; uniform float uVig; uniform float uOver; uniform float uSharp; uniform float uInvW; uniform float uInvH;\n' +
+        (typeof WorldRenderer !== 'undefined' ? WorldRenderer.DETAIL_GLSL : 'vec3 detailAt(vec2 uv,vec3 col){return col;}\n') +
         'void main(){\n' +
         // uOver shrinks the output radius BEFORE the inverse, so the corner lands inside the warp's reach
         // instead of falling out of domain and being filled black. uOver = 1.0 is the old behaviour exactly.
@@ -6079,6 +6413,7 @@ const World = (() => {
         '    float b = texture2D(uTex, sUv - offs).b;\n' +
         '    col = vec3(r, gg, b);\n' +
         '  } else { col = texture2D(uTex, sUv).rgb; }\n' +
+        '  col = detailAt(sUv,col);\n' +
         '  float vig = clamp(1.0-uVig*ro*ro, 0.0, 1.0);\n' +
         '  gl_FragColor = vec4(col*vig, 1.0);\n' +
         '}';
@@ -6101,6 +6436,8 @@ const World = (() => {
       gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
       _glKLoc = gl.getUniformLocation(prog, 'uK'); _glAberrLoc = gl.getUniformLocation(prog, 'uAberr');
       _glVigLoc = gl.getUniformLocation(prog, 'uVig'); _glOverLoc = gl.getUniformLocation(prog, 'uOver');
+      _glSharpLoc = gl.getUniformLocation(prog, 'uSharp');
+      _glInvWLoc = gl.getUniformLocation(prog, 'uInvW'); _glInvHLoc = gl.getUniformLocation(prog, 'uInvH');
       _glProg = prog; _glReady = true;
       return true;
     } catch (e) { _gl = null; return abandonCurveGL('WebGL curve unavailable: ' + ((e && e.message) || String(e))); }
@@ -6129,6 +6466,9 @@ const World = (() => {
       if (_glAberrLoc) gl.uniform1f(_glAberrLoc, Math.max(0, CRT.aberr || 0));
       if (_glVigLoc) gl.uniform1f(_glVigLoc, vigAmt());
       if (_glOverLoc) gl.uniform1f(_glOverLoc, overAmt());
+      if (_glSharpLoc) gl.uniform1f(_glSharpLoc, sharpAmt());
+      if (_glInvWLoc) gl.uniform1f(_glInvWLoc, 1 / W);
+      if (_glInvHLoc) gl.uniform1f(_glInvHLoc, 1 / H);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       // Context loss is deliberately checked AGAIN after GPU work and BEFORE the destructive clear below.
       // WebGL commands on a lost context are specified to no-op instead of throwing; without this guard the
@@ -6180,7 +6520,12 @@ const World = (() => {
     const src = _warpCtx.getImageData(0, 0, W, H), s32 = new Uint32Array(src.data.buffer);
     if (!_outImg || _outImg.width !== W || _outImg.height !== H) _outImg = ctx.createImageData(W, H);
     const d32 = new Uint32Array(_outImg.data.buffer), lut = _lut, BLACK = 0xFF000000;
-    for (let i = 0; i < d32.length; i++) { const s = lut[i]; d32[i] = s < 0 ? BLACK : s32[s]; }
+    const sharp = sharpAmt();
+    if (sharp) {
+      for (let i = 0; i < d32.length; i++) { const s = lut[i]; d32[i] = s < 0 ? BLACK : WorldRenderer.sharpenSample(s32, s, W, H, sharp); }
+    } else {
+      for (let i = 0; i < d32.length; i++) { const s = lut[i]; d32[i] = s < 0 ? BLACK : s32[s]; }
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.putImageData(_outImg, 0, 0);
     // Edge vignette — the exact darkening complement of the shader's `1 - uVig·ro²`, so the CPU fallback
     // stays pixel-equivalent to the GPU path (drawCurveGL's probe compares them). A stop at gradient
@@ -6197,15 +6542,139 @@ const World = (() => {
     ctx.restore();
   }
 
+  function clipInteriorLight() {
+    if (cache && cache.interiorPath) ctx.clip(cache.interiorPath);
+  }
+
+  // Fixture halos stay anchored and steady. Reuse the gradient until a rebake
+  // replaces its lamp object; no gradient allocation or brightness beat per frame.
+  const _fixtureGlow = new WeakMap();
   function drawGlows(now) {
     if (!cache || !cache.flickers) return;
     ctx.globalCompositeOperation = 'lighter';
     for (const f of cache.flickers) {
-      const a = Math.max(0, CRT.glow * (0.55 + 0.45 * Math.sin(now / 210 + f.x) * Math.sin(now / 83 + f.y)));
-      const g = ctx.createRadialGradient(f.x, f.y, 1, f.x, f.y, f.r * 0.7);
-      g.addColorStop(0, 'rgba(238,218,184,' + a + ')'); g.addColorStop(1, 'rgba(238,218,184,0)');
+      let g = _fixtureGlow.get(f);
+      if (!g) {
+        g = ctx.createRadialGradient(f.x, f.y, 1, f.x, f.y, f.r * 0.7);
+        const rgb = f.rgb || '238,218,184';
+        g.addColorStop(0, 'rgba(' + rgb + ',1)'); g.addColorStop(1, 'rgba(' + rgb + ',0)');
+        _fixtureGlow.set(f, g);
+      }
+      ctx.globalAlpha = Math.max(0, Math.min(1, CRT.glow * 0.55));
       ctx.fillStyle = g; ctx.fillRect(f.x - f.r * 0.7, f.y - f.r * 0.7, f.r * 1.4, f.r * 1.4);
     }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /* ---- PROP LIGHT SOURCES (world overhaul, 2026-09-03) ----
+     The baked lightmap knows only the ceiling fixtures. A lit screen, a plasma core, a kiln or a desk lamp
+     is a light source too, and PropSprites.lightOf says what each emits this frame (colour, reach, strength,
+     flicker). Painted ADDITIVELY over the lightmap, so the deck under a screen takes its phosphor, a body at a
+     lamp takes its warmth, and the source itself glows — the same 'lighter' pass the lamp shimmer uses.
+     One radial gradient per source, cached by (position, radius, colour): the gradient never changes, only
+     the alpha it is painted at, so a busy station costs one fillRect per source per frame and no allocation.
+     CRT.emit scales the whole pass (0 = off = the pre-overhaul deck). */
+  const _emitGrad = new Map();
+  function drawPropLights(now, lights) {
+    const k = +CRT.emit;
+    if (!lights || !lights.length || !(k > 0.001)) return;
+    ctx.globalCompositeOperation = 'lighter';
+    for (const l of lights) {
+      const key = l.x + ',' + l.y + ',' + l.r + ',' + l.c[0] + ',' + l.c[1] + ',' + l.c[2];
+      let g = _emitGrad.get(key);
+      if (!g) {
+        if (_emitGrad.size > 600) _emitGrad.clear();   // a station is rebuilt, not grown, past this — never let the cache grow unbounded
+        g = ctx.createRadialGradient(l.x, l.y, 1, l.x, l.y, l.r);
+        const rgb = l.c[0] + ',' + l.c[1] + ',' + l.c[2];
+        g.addColorStop(0, 'rgba(' + rgb + ',1)'); g.addColorStop(0.3, 'rgba(' + rgb + ',0.55)');
+        g.addColorStop(0.65, 'rgba(' + rgb + ',0.18)'); g.addColorStop(1, 'rgba(' + rgb + ',0)');
+        _emitGrad.set(key, g);
+      }
+      ctx.globalAlpha = Math.max(0, Math.min(1, l.a * k));
+      ctx.fillStyle = g; ctx.fillRect(l.x - l.r, l.y - l.r, l.r * 2, l.r * 2);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /* Hull beacons use bake-validated mount points on the exterior skirt.
+     Placement and housing are static; only a small lens changes intensity. */
+  function drawNavLights(now) {
+    if (!cache || !cache.navLights || !cache.navLights.length) return;
+    const still = reduceMotion();
+    ctx.save();
+    try {
+      for (const l of cache.navLights) {
+        const x=l.x,y=l.y;
+        ctx.globalCompositeOperation='source-over';
+        ctx.fillStyle='#0b1119';ctx.fillRect(x-2,y-2,5,5);
+        ctx.fillStyle='#26333f';ctx.fillRect(x-1,y-2,3,1);
+        ctx.fillStyle='#101924';ctx.fillRect(x-2,y-1,1,3);
+        const t=still?0.5:((now/(l.red?1400:2200)+l.phase)%1);
+        const on=still?0.55:(t<0.14?1:t<0.34?1-0.7*(t-0.14)/0.2:0.3);
+        const c=l.red?'255,70,60':'255,190,90';
+        ctx.globalCompositeOperation='lighter';
+        ctx.fillStyle='rgba('+c+','+(0.10*on).toFixed(3)+')';ctx.fillRect(x-1,y-1,3,3);
+        ctx.fillStyle='rgba('+c+','+(0.9*on).toFixed(3)+')';ctx.fillRect(x,y,2,2);
+      }
+    } finally {ctx.restore();}
+  }
+
+  /* ---- PHOSPHOR BLOOM (world overhaul, 2026-09-03) ----
+     A CRT's bright pixels bleed into their neighbours; ours stopped dead at the pixel edge, which is the
+     single biggest reason the feed read as "a canvas" rather than "a tube". This is a soft-threshold bloom
+     done entirely with canvas compositing — no readback, no shader, nothing per-pixel on the CPU:
+       1. the frame is drawn DOWN to 1/4 size (smoothing on: that is the first blur tap);
+       2. the small copy is multiplied by itself twice, v → v⁴, which is a soft threshold — a lit deck at
+          0.4 falls to 0.03 and vanishes, a screen at 0.9 keeps 0.66;
+       3. it is blurred by scaling — down to 1/3 and back up with bilinear smoothing, twice. That is a
+          box blur by other means, and it is a plain resample the GPU (and even SwiftShader) does for
+          nothing; canvas `filter: blur()` was measured at +3 ms a frame on the software GL of headless
+          Chrome and WKWebView does not ship it at all;
+       4. it is added back over the frame at CRT.bloom, upscaled with smoothing so it is a haze, not blocks.
+     Runs BEFORE the barrel warp so the bloom bows with the picture and the scanlines then sit over both.
+     THE HAZE IS EXTRACTED EVERY OTHER FRAME and the composite reuses it in between — at 1/5 resolution a
+     one-frame-stale bloom is invisible, and it halves the pass's cost. The only full-frame read is the
+     first downscale. Never reads pixels back (the frame-loop getImageData law). */
+  let _blA = null, _blB = null, _blCtxA = null, _blCtxB = null, _blFrame = 0, _blFresh = false;
+  function drawBloom(now) {
+    const k = +CRT.bloom;
+    if (!cv || !(k > 0.001) || document.body.classList.contains('no-scan')) return;
+    const W = cv.width, H = cv.height;
+    if (W < 16 || H < 16) return;
+    const S = 5, bw = Math.max(3, Math.ceil(W / S)), bh = Math.max(3, Math.ceil(H / S));
+    if (!_blA || _blA.width !== bw || _blA.height !== bh) {
+      _blA = document.createElement('canvas'); _blA.width = bw; _blA.height = bh; _blCtxA = _blA.getContext('2d');
+      _blB = document.createElement('canvas'); _blB.width = bw; _blB.height = bh; _blCtxB = _blB.getContext('2d');
+      if (!_blCtxA || !_blCtxB) { _blA = null; return; }
+      _blFresh = false;
+    }
+    const A = _blCtxA, B = _blCtxB;
+    if (!_blFresh || (_blFrame++ & 1) === 0) {
+      A.setTransform(1, 0, 0, 1, 0, 0); A.globalCompositeOperation = 'source-over'; A.globalAlpha = 1; A.imageSmoothingEnabled = true;
+      A.clearRect(0, 0, bw, bh);
+      A.drawImage(cv, 0, 0, W, H, 0, 0, bw, bh);
+      A.globalCompositeOperation = 'multiply';
+      A.drawImage(_blA, 0, 0); A.drawImage(_blA, 0, 0);   // v → v² → v⁴: the soft threshold
+      A.globalCompositeOperation = 'source-over';
+      B.setTransform(1, 0, 0, 1, 0, 0); B.globalCompositeOperation = 'source-over'; B.globalAlpha = 1; B.imageSmoothingEnabled = true;
+      const qw = Math.max(1, Math.ceil(bw / 3)), qh = Math.max(1, Math.ceil(bh / 3));
+      for (let i = 0; i < 2; i++) {                        // two down/up rounds ≈ a 9px blur at full size
+        B.clearRect(0, 0, qw, qh);
+        B.drawImage(_blA, 0, 0, bw, bh, 0, 0, qw, qh);
+        A.clearRect(0, 0, bw, bh);
+        A.drawImage(_blB, 0, 0, qw, qh, 0, 0, bw, bh);
+      }
+      _blFresh = true;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = Math.min(1, k);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(_blA, 0, 0, bw, bh, 0, 0, W, H);
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
 
@@ -6405,7 +6874,10 @@ const World = (() => {
       const prevA = ctx.globalAlpha;
       if (bornA < 1) ctx.globalAlpha = prevA * bornA;
       let geom = null;
-      if (typeof SPRITES !== 'undefined' && SPRITES.ready) geom = SPRITES.drawBody(ctx, who, now);
+      const bodyLight = sceneRenderer && sceneRenderer.sampleLight(who.px, who.py);
+      if (typeof SPRITES !== 'undefined' && SPRITES.ready) geom = SPRITES.drawBody(ctx, who, now,
+        bodyLight ? { reducedMotion: reduceMotion(), light: bodyLight,
+          skipGroundShadow: !who.seated && !who.lying } : undefined);
       // Do not flash the cyan procedural body while the real default skin is actively loading.
       // A genuine load failure still clears `loading` and gets the honest fallback on the next frame.
       if (!geom && !(typeof SPRITES !== 'undefined' && SPRITES.loading)) drawFallback(now, who);
@@ -6430,7 +6902,7 @@ const World = (() => {
       // SUMMONED-WORKER "working" glow — a soft sustained pulse at the feet of a crew body while ITS real run
       // is in flight (workUntil set by setActivityFor). The honest "this agent is actually working" cue for a
       // deskless summoned worker; hero-exempt (the hero shows work at its desk).
-      if (who !== agent && who.workUntil && now < who.workUntil) {
+      if (who !== agent && !crewIsAwaiting(who) && who.workUntil && now < who.workUntil) {
         const wp = 0.35 + 0.25 * Math.sin(now / 360);
         ctx.save(); ctx.globalAlpha = wp * 0.7; ctx.strokeStyle = who.color; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.ellipse(who.px, who.py, 7 + 1.5 * Math.sin(now / 360), 3, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
@@ -6578,7 +7050,7 @@ const World = (() => {
     if (linkStaleDim) ctx.globalAlpha = 0.3;   // E1: link down → these clocks are last-known, not live; dim them
     for (const [aid, t0] of runStartByAgent) {
       const b = bodyForAgent(aid);
-      if (!b || b.unplaced) continue;
+      if (!b || b.unplaced || crewIsAwaiting(b)) continue;
       // only at a desk that is honestly in the working pose — a talk-only run never grows a clock
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
@@ -6610,7 +7082,7 @@ const World = (() => {
     if (!glyphByAgent.size) return;
     for (const [aid, g] of glyphByAgent) {
       const b = bodyForAgent(aid);
-      if (!b || b.unplaced) continue;
+      if (!b || b.unplaced || crewIsAwaiting(b)) continue;
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
       const label = '▸ ' + tickerTool(g && g.name);
@@ -6633,9 +7105,9 @@ const World = (() => {
      World-space, VT323 with an amber phosphor bloom (the consent-warning colour), a slow blink so it reads as
      a live pending state — a glance, never a window. Only while the hero is genuinely blocked (awaitPrompt). */
   const AWAIT_FONT = "8px 'VT323','Courier New',monospace";
-  function drawAwaitTag(now) {
-    if (!awaitPrompt || !agent || agent.unplaced) return;
-    const x = rposX(), y = rposY();
+  function drawAwaitTag(now, body) {
+    if (body ? (!crewIsAwaiting(body) || body.unplaced) : (!awaitPrompt || !agent || agent.unplaced)) return;
+    const x = body ? bodyPosX(body) : rposX(), y = body ? bodyPosY(body) : rposY();
     const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(now / 380));   // slow breathing so it never looks frozen
     const label = 'AWAITING APPROVAL';
     ctx.save();
@@ -6682,12 +7154,12 @@ const World = (() => {
     ctx.restore();
   }
 
-  /* ---------- the SPEECH BUBBLE: what a body is saying right now (a routed "received: …" beat, a muttered
-     aside, an error line, a LEVEL tick). Rendered in the SAME material as the nameplate — screen-space + no
-     smoothing so the VT323 stays crisp instead of being scaled-then-barrel-warped into mush, dark CRT glass
-     with scanlines, an amber structural frame with a suit accent, a warm phosphor bloom, and a small tail
+  /* ---------- the SPEECH BUBBLE: what a body is saying right now (a muttered
+     aside, an error line, a LEVEL tick). Rendered in screen-space with no
+     smoothing so VT323 stays crisp: quiet dark glass, a fine neutral frame,
+     a small suit-colour accent, restrained phosphor bloom, and a small tail
      pointing down at the head. A glance, never a window (hover law). */
-  const BUBBLE_MAXW = 152;   // CSS px — a spoken line wraps within this before ellipsizing
+  const BUBBLE_MAXW = 168;   // CSS px — compact remarks, not floating panels
   function drawBubble(now, who) {
     who = who || agent;
     if (!cache || !who) return;
@@ -6702,21 +7174,31 @@ const World = (() => {
 
     // draw in SCREEN space (mirrors drawNameplate): pixel-snapped, unsmoothed VT323 that reads cleanly at any
     // zoom, then it rides the same barrel-curve/scanline pass the rest of the feed does. All geometry is CSS px.
+    ctx.save();
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = false;
     const Wc = cv.width / dpr, Hc = cv.height / dpr;
     const suit = who.color || '#ffaa33';
 
-    // wrap to <=3 lines within BUBBLE_MAXW; ellipsize a truncated tail so an overrun reads as "…", not a hard cut
-    const fontSz = 15, lh = 16, padX = 6, padY = 5, tailW = 5, tailH = 6;
+    // Wrap to <=3 lines; ellipsize overflow, including unbroken identifiers.
+    const fontSz = 16, lh = 17, padX = 6, padY = 5, tailW = 4, tailH = 5;
+    const raw = String(s.text);
+    const tag = raw.match(/^(working|error|blocked):\s*/i);
+    const label = tag ? tag[1].toUpperCase() : '';
+    const labelH = label ? 13 : 0;
     ctx.font = fontSz + 'px ' + PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    const words = String(s.text).split(' '), lines = []; let line = '', truncated = false;
+    const words = (tag ? raw.slice(tag[0].length) : raw).split(/\s+/), lines = []; let line = '', truncated = false;
     for (const w of words) {
       const test = line ? line + ' ' + w : w;
       if (ctx.measureText(test).width > BUBBLE_MAXW && line) {
         lines.push(line); line = w;
         if (lines.length >= 3) { truncated = true; break; }
       } else line = test;
+      // An unbroken URL or identifier must stay inside the card too.
+      if (ctx.measureText(line).width > BUBBLE_MAXW) {
+        while (line && ctx.measureText(line + '…').width > BUBBLE_MAXW) line = line.slice(0, -1);
+        truncated = true; break;
+      }
     }
     if (line && lines.length < 3) lines.push(line);
     else if (line) truncated = true;
@@ -6726,8 +7208,8 @@ const World = (() => {
       lines[lines.length - 1] = last.replace(/\s+$/, '') + '…';
     }
     const textW = lines.length ? Math.max.apply(null, lines.map(l => ctx.measureText(l).width)) : 1;
-    const bw = Math.round(Math.max(26, Math.min(BUBBLE_MAXW, textW) + padX * 2));
-    const bh = lines.length * lh + padY * 2;
+    const bw = Math.round(Math.max(label ? 72 : 28, Math.min(BUBBLE_MAXW, textW) + padX * 2));
+    const bh = lines.length * lh + padY * 2 + labelH;
 
     // anchor centered above the head, crisp + clamped to the canvas (same body->screen math as the nameplate)
     const ax = (bodyPosX(who) * scale + panX) / dpr, ay = (bodyPosY(who) * scale + panY) / dpr;
@@ -6741,39 +7223,41 @@ const World = (() => {
 
     bubbleChrome(bx, by, bw, bh, tx, tailW, tailH, suit, 1);
 
-    // the line(s): VT323 in warm phosphor, with any leading "label:" (received:, working…) dimmed to a tag
+    // Separate provenance from message content; keep the message itself calm and readable.
     ctx.font = fontSz + 'px ' + PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    ctx.shadowBlur = 4; ctx.shadowColor = suit;
-    ctx.fillStyle = '#ffe0b0';
-    lines.forEach((l, i) => ctx.fillText(l, bx + padX, by + padY + lh * (i + 1) - 4));
-    const label = lines.length ? (lines[0].match(/^\S+:/) || [])[0] : null;
-    if (label) { ctx.shadowBlur = 3; ctx.fillStyle = 'rgba(255,171,64,0.72)'; ctx.fillText(label, bx + padX, by + padY + lh - 4); }
-    ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 1; ctx.shadowColor = suit;
+    ctx.fillStyle = '#eee8db';
+    lines.forEach((l, i) => ctx.fillText(l, bx + padX, by + padY + labelH + lh * (i + 1) - 4));
+    if (label) {
+      ctx.shadowBlur = 0; ctx.font = '12px ' + PLATE_FONT;
+      ctx.fillStyle = suit; ctx.globalAlpha = 0.8;
+      ctx.fillText(label, bx + padX, by + padY + 9);
+    }
+    ctx.restore();
   }
 
-  /* The bubble's MATERIAL, content-free: dark CRT glass + scanlines, an amber structural frame, the
-     tail poured into the same surface, a suit accent along the crown. Extracted so the spoken-line
+  /* The bubble's MATERIAL, content-free: dark glass, a quiet frame, the
+     tail poured into the same surface, a small suit accent. Shared so the spoken-line
      bubble and the peer-chatter bubble are physically the SAME object and can never drift into two
-     looks. `a` scales every alpha in one place so a caller can fade the whole card; a === 1 is the
-     shipped spoken-line appearance, unchanged stroke for stroke. */
+     looks. `a` scales every alpha so a caller can fade the whole card. */
   function bubbleChrome(bx, by, bw, bh, tx, tailW, tailH, suit, a) {
     a = (a == null) ? 1 : a;
     ctx.globalAlpha = a;
-    ctx.fillStyle = 'rgba(6,5,4,0.94)'; ctx.fillRect(bx, by, bw, bh);
+    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+    ctx.fillStyle = 'rgba(13,17,19,0.97)'; ctx.fillRect(bx, by, bw, bh);
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
     // the pointing tail (glass, so box + tail read as one poured surface)
     ctx.beginPath(); ctx.moveTo(tx - tailW, by + bh); ctx.lineTo(tx + tailW, by + bh); ctx.lineTo(tx, by + bh + tailH); ctx.closePath(); ctx.fill();
-    ctx.globalAlpha = 0.13 * a; ctx.fillStyle = '#000';
-    for (let sy = by + 2; sy < by + bh - 1; sy += 3) ctx.fillRect(bx + 1, sy, bw - 2, 1);
     ctx.globalAlpha = a;
 
-    // amber structural frame: the box outline + the two slanted tail edges, then re-glass the seam so the tail
+    // Fine structural frame and tail edges; re-glass the seam so the tail
     // opens into the box instead of being fenced off by the box's bottom stroke
-    ctx.strokeStyle = '#b9791c'; ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(173,190,187,0.3)'; ctx.lineWidth = 1;
     ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
     ctx.beginPath(); ctx.moveTo(tx - tailW, by + bh - 0.5); ctx.lineTo(tx, by + bh + tailH); ctx.lineTo(tx + tailW, by + bh - 0.5); ctx.stroke();
-    ctx.fillStyle = 'rgba(6,5,4,0.94)'; ctx.fillRect(tx - tailW + 1, by + bh - 1, tailW * 2 - 1, 2);
-    // suit accent along the top edge (the body's own colour, like the nameplate's crown)
-    ctx.globalAlpha = 0.6 * a; ctx.fillStyle = suit; ctx.fillRect(bx + 1, by, bw - 2, 1); ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(13,17,19,0.97)'; ctx.fillRect(tx - tailW + 1, by + bh - 1, tailW * 2 - 1, 2);
+    // Suit colour is a small identity accent, leaving the message as the brightest element.
+    ctx.globalAlpha = 0.8 * a; ctx.fillStyle = suit; ctx.fillRect(bx + 1, by + 6, 2, Math.min(16, bh - 12)); ctx.globalAlpha = a;
   }
 
   /* ---------- W6: THE PEER-CHATTER BUBBLE — the untranscribable line over whoever holds the floor.
@@ -7296,6 +7780,7 @@ const World = (() => {
     // a serverLit entry whose agent has NO live run and NO run clock is a leftover from an overlap window
     // (the scheduled run ended while a chat run kept the pose; the chat teardown owned the extinguish) — drop it.
     for (const aid of Array.from(serverLit)) if (!agentRunsLive(aid) && !runStartByAgent.has(aid)) serverLit.delete(aid);
+    for (const b of crew) if (crewIsAwaiting(b)) for (const [id, p] of Array.from(b.pendingApprovals)) if (now - p.at > AWAIT_TTL_MS) clearCrewAwait(b, id, false);
     if (awaitPrompt && awaitStampAt && (now - awaitStampAt > AWAIT_TTL_MS)) clearAwait();   // a lost permission.response never strands the hero
   }
   /* Lane E2 — reconnect reconciliation (the PRIMARY correction). On every SSE (re)open, ask the sidecar for the
@@ -7372,6 +7857,7 @@ const World = (() => {
     // ---- pending permission prompt: enter it if the server still has one for the hero, else clear a stale await ----
     if ('pendingPrompts' in snap) {
       const prompts = Array.isArray(snap.pendingPrompts) ? snap.pendingPrompts : [];
+      reconcileCrewAwaits(prompts);
       const mine = prompts.find(p => p && (!p.agentId || (agent && p.agentId === agent.id)));
       if (mine) enterAwait({ promptId: mine.promptId || '', agentId: mine.agentId || (agent && agent.id) });
       else if (awaitPrompt) clearAwait();   // the prompt was answered during the outage
@@ -7427,6 +7913,7 @@ const World = (() => {
   function apiBase() { return (typeof window !== 'undefined' && window.__STARNET_API__) ? window.__STARNET_API__ : ''; }
   function apiUrl(path) { return apiBase() + path; }
   let chanES = null, connPollTimer = null, connPollFn = null, connOpenFn = null, bridgePaused = false;
+  let bridgeCursor = '', bridgeRecovering = false;
   let spotifyPollTimer = null, spotifyPollFn = null;   // JUKEBOX dead-vs-live poll (shares the bridge pause/resume lifecycle)
   // LINK-DOWN HONESTY (Lane E1): the live station telemetry (queue gauges, run clocks) is only truthful while
   // the SSE bridge is actually delivering events. Track the last DATA event's wall-clock and the socket's
@@ -7444,6 +7931,7 @@ const World = (() => {
   function linkDown(now) {
     if (bridgePaused) return false;                                   // deliberately disconnected — not a fault
     if (!bridged) return false;                                       // bridge never set up yet (pre-entry)
+    if (bridgeRecovering) return true;                                // bytes alone do not prove recovered state
     const open = !!(chanES && typeof EventSource !== 'undefined' && chanES.readyState === EventSource.OPEN);
     if (!open) return true;                                           // socket missing / connecting / closed → down
     if (lastSseEventAt && (now - lastSseEventAt) > LINK_STALE_MS) return true;   // half-open: bytes stopped flowing
@@ -7707,7 +8195,7 @@ const World = (() => {
     }
   }
   /* LONE-BAY DOCK ARRIVAL: with no intake/belt route, work addressed to an agent still lands VISIBLY at its
-     bay — a dock flash + the same "received:" beat the belt delivery rings. This is what makes a single
+     bay through a dock flash and wake reaction. This is what makes a single
      assigned BAY a complete, working build (belts become the upgrade for watching work travel, never a
      prerequisite). Purely visual: the sidecar already ran the work either way (belt-is-never-a-gate law). */
   const dockFlashes = new Map();   // bay propId -> flash t0 (drawn by drawDockFlashes, ~1.1s decay)
@@ -7720,8 +8208,8 @@ const World = (() => {
     if (!dock) return;                                             // no (matching) bay → nothing to show (today's behavior)
     dockFlashes.set(dock.propId, fnow);
     const body = bodyForAgent(aid);
-    if (body && body !== agent) { sayAt(body, 'received: ' + (p.preview || 'message')); body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
-    else if (agent && !agent.unplaced) { say('received: ' + (p.preview || 'message')); wakeIn(); }
+    if (body && body !== agent) { body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
+    else if (agent && !agent.unplaced) { wakeIn(); }
   }
   // the dock catching a delivery: a bright ring + rim flash over the bay, ~1.1s, additive (with the glows)
   function drawDockFlashes(now) {
@@ -7925,6 +8413,7 @@ const World = (() => {
     // No bound bays (or no geo yet): drop the plan-derived crew, but KEEP summoned bodies — a summoned-but-unbound
     // agent has no bay, so an empty plan must NOT wipe it (else it vanishes on the next rederive, e.g. a build toggle).
     if (!routingPlan || !routingPlan.bays || !routingPlan.bays.length || !geo) {
+      for (const b of crew) if (!b.summoned) seizeFromIdle(b);
       crew = crew.filter(b => b.summoned);
       if (geo) refootStranded();   // the no-bays plan used to SKIP the stranded re-foot entirely — a summoned body off the floor (pre-geo {0,0} park, a refit) stayed in the void forever (2026-07-12)
       sweepAgentMaps(); return;
@@ -7946,6 +8435,7 @@ const World = (() => {
       }
       want.set(bay.agentId, f || { x: (p.x + (p.w > 1 ? 1 : 0)) * T + T / 2, y: (p.y + (p.h || 1) - 1) * T + T - 1 });
     }
+    for (const b of crew) if (!b.summoned && !want.has(b.agentId)) seizeFromIdle(b);
     crew = crew.filter(b => b.summoned || want.has(b.agentId));        // drop plan bodies whose bay is gone; KEEP summoned crew
     for (const [aid, pos] of want) {
       const b = crew.find(x => x.agentId === aid && !x.summoned);
@@ -8096,6 +8586,7 @@ const World = (() => {
     const i = crew.findIndex(b => b.agentId === agentId);
     if (i < 0) return false;
     if (chaseId === agentId) chaseId = null;   // drop any active chase lock addressed to the gone body (sweepChase would clear it next tick anyway)
+    seizeFromIdle(crew[i]);   // release its furniture reservation before the body becomes unreachable
     crew.splice(i, 1);
     return true;
   }
@@ -8124,10 +8615,12 @@ const World = (() => {
     if (!b) return;                                                       // not yet spawned (e.g. summon mid-flight) — nothing to animate
     const working = (kind === 'task' || kind === 'thinking');
     b.working = working; b.sitting = false; b.dir = working ? 'north' : 'south';   // face away = "at work"; stepCrew seats it at its desk if it has one, else it stands here
+    b.workRetryAt = 0;
     if (working) { b.target = null; b.pathPts = null; seizeFromIdle(b); }   // drop any in-flight stroll AND any couch/leisure latch so stepCrew re-paths straight to the chair (J4)
     const now = now0;
     if (working) { b.workUntil = now + 3600000; if (!b.wakeAt || now - b.wakeAt > 1500) b.wakeAt = now; sayAt(b, 'working…'); }
-    else { b.workUntil = 0; if (b.say && /working/.test(b.say.text || '')) b.say = { text: '', until: 0 }; }
+    else { b.workUntil = 0; clearCrewAwait(b, null, false); if (b.say && /working/.test(b.say.text || '')) b.say = { text: '', until: 0 }; }
+    if (working && crewIsAwaiting(b)) { b.awaitResumeWork = true; b.working = false; b.say = { text: '', until: 0 }; }
     if (working) gripeNoCompute(b);      // G0.7: sat down to work in a computeless room — one honest complaint, then silence
     if (working) summonGlance(b, now);   // C-Beat1: AFTER the work-seize (K3 summon-wins) — OTHER idle in-sight bodies 50% glance at the newly-summoned `b`
   }
@@ -8186,7 +8679,7 @@ const World = (() => {
     if (!p.agentId) return false;
     if (agent && p.agentId === agent.id) return !!agent.working;
     const b = crew.find(x => x.agentId === p.agentId);
-    return !!(b && b.workUntil > now);
+    return !!(b && !crewIsAwaiting(b) && b.workUntil > now);
   }
   // a payload box reached an open end: route it to the bound agent's bay (the SAME bay the box rode to, per the
   // plan) and light THAT body. No bay / unrouted -> the hero receives it, exactly as before (never stalls).
@@ -8210,15 +8703,15 @@ const World = (() => {
       return;
     }
     // INBOUND: prefer the agentId the box CARRIES — cron/channel address it explicitly to the run's agent, so the
-    // "received" beat lands on exactly the body that runs (server-authoritative; no re-derivation drift). Fall
+    // wake reaction lands on exactly the body that runs (server-authoritative; no re-derivation drift). Fall
     // back to the landing tile, then resolveTarget(tag), for an unaddressed box. The work POSE itself is owned by
-    // the run-lifecycle binding above, so here we only ring the "received: <instruction>" beat and NEVER cut short
+    // the run-lifecycle binding above, so delivery only wakes the body and NEVER cuts short
     // an already-working body (an active run's glow must outlast this 4s pulse).
     const landed = (routingPlan && routingPlan.bayTileToAgent) ? routingPlan.bayTileToAgent[bx.x + ',' + bx.y] : null;
     const aid = p.agentId || landed || ((typeof Pipeline !== 'undefined' && routingPlan) ? Pipeline.resolveTarget(routingPlan, { tag: p.tag }) : null);
     const body = bodyForAgent(aid);
-    if (body && body !== agent) { sayAt(body, 'received: ' + (p.preview || 'message')); body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
-    else { say('received: ' + (p.preview || 'message')); wakeIn(); }   // the hero (or an unrouted box) — today's behaviour
+    if (body && body !== agent) { body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
+    else { wakeIn(); }   // the hero (or an unrouted box)
   }
   /* ---------- the CAM-HUD ACTIVITY TICKER (stage narration) ----------
      A single diegetic security-camera line at the bottom of the .cam-hud overlay that names WHAT the station
@@ -8617,10 +9110,19 @@ const World = (() => {
     // G4 feature 1 — APPROVAL WALK-AND-WAIT. The run PAUSED on the sidecar awaiting a human yes/no (permission.prompt,
     // {promptId, agentId}). For the HERO, walk the body off its desk to the wait anchor and hold the waiting pose;
     // permission.response ({promptId, decision}) resumes (approve) or ends (deny) the run server-side, so we clear
-    // the await and let the ongoing/finished run drive the body back to work or idle. (A DELEGATED worker's block
-    // rides the lead's stream — hero-scoped here; crew await is future work.)
-    U.bus.on('permission.prompt', p => { if (p && (!p.agentId || (agent && p.agentId === agent.id))) enterAwait({ promptId: p.promptId || '', agentId: p.agentId || (agent && agent.id) }); });
-    U.bus.on('permission.response', p => { if (p && awaitPrompt && (!p.promptId || p.promptId === awaitPrompt.promptId)) clearAwait(); });
+    // the await and let the ongoing/finished run drive the body back to work or idle. Crew pauses hold position with the same amber tag; prompt IDs isolate overlapping approvals.
+    U.bus.on('permission.prompt', p => { if (p && (!p.agentId || (agent && p.agentId === agent.id))) enterAwait({ promptId: p.promptId || '', agentId: p.agentId || (agent && agent.id) }); else enterCrewAwait(p); });
+    U.bus.on('permission.response', p => {
+      if (p && awaitPrompt && (!p.promptId || p.promptId === awaitPrompt.promptId)) clearAwait();
+      if (p && p.promptId) for (const b of crew) clearCrewAwait(b, p.promptId, true);
+    });
+    U.bus.on('agent.run.end', p => {
+      if (!p || !p.agentId) return;
+      const b = bodyForAgent(p.agentId);
+      if (!b || b === agent) return;
+      if (!agentRunsLive(p.agentId)) clearCrewAwait(b, null, false);
+      else if (crewIsAwaiting(b)) for (const [id, prompt] of Array.from(b.pendingApprovals)) if (prompt.runId && prompt.runId === p.runId) clearCrewAwait(b, id, true);
+    });
     // CONNECTOR PORTALS — make the external on-ramp LIVE: poll each configured server's state so a placed
     // portal glows green/amber/red, and pulse it when ITS tools fire (an mcp__<connectorId>__* tool call).
     const connIds = [];
@@ -8729,11 +9231,34 @@ const World = (() => {
         // EventSource can't send the custom auth header, so pass the per-launch token as ?token=… and
         // prefix the sidecar base in the desktop build (where the page origin isn't the loopback http origin).
         const _tok = (typeof window !== 'undefined' && window.__STARNET_API_TOKEN__) ? encodeURIComponent(String(window.__STARNET_API_TOKEN__)) : '';
-        chanES = new EventSource(apiUrl('/api/channels/events') + (_tok ? ('?token=' + _tok) : ''));
+        chanES = new EventSource(apiUrl('/api/channels/events') + '?cursor=' + encodeURIComponent(bridgeCursor) + (_tok ? ('&token=' + _tok) : ''));
       } catch (_) { return; }
-      chanES.onopen = () => { backoff = 1000; lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow; fetchSnapshot(); };
-      chanES.onmessage = ev => { lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow; try { const m = JSON.parse(ev.data); if (m && m.name) U.bus.emit(m.name, m.payload); } catch (_) {} };
-      chanES.onerror = () => { try { chanES.close(); } catch (_) {} chanES = null; if (bridgePaused) return; if (retryTimer) { try { clearTimeout(retryTimer); } catch (_) {} } retryTimer = setTimeout(() => { retryTimer = null; open(); }, backoff); backoff = Math.min(15000, backoff * 2); };
+      const source = chanES;
+      bridgeRecovering = true;
+      source.onopen = () => { if (chanES !== source) return; backoff = 1000; lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow; };
+      source.onmessage = ev => {
+        if (chanES !== source || bridgePaused) return;
+        lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow;
+        try {
+          const m = JSON.parse(ev.data);
+          if (m && m.stream === 'ready') {
+            bridgeCursor = String(m.cursor || '');
+            // Snapshot reconciliation is also needed after a complete replay: it repairs any
+            // pre-existing local drift without pretending an expired history was delivered.
+            fetchSnapshot();
+            return;
+          }
+          if (m && m.name) {
+            const id = String(ev.lastEventId || '');
+            const split = id.lastIndexOf(':'), prior = bridgeCursor.lastIndexOf(':');
+            if (id && split > 0 && prior > 0 && id.slice(0, split) === bridgeCursor.slice(0, prior)
+              && Number(id.slice(split + 1)) <= Number(bridgeCursor.slice(prior + 1))) return;
+            U.bus.emit(m.name, m.payload);
+            if (id) bridgeCursor = id;
+          }
+        } catch (_) {}
+      };
+      source.onerror = () => { if (chanES !== source) return; try { source.close(); } catch (_) {} chanES = null; bridgeRecovering = true; if (bridgePaused) return; if (retryTimer) { try { clearTimeout(retryTimer); } catch (_) {} } retryTimer = setTimeout(() => { retryTimer = null; open(); }, backoff); backoff = Math.min(15000, backoff * 2); };
     };
     connOpenFn = open;
     open();
@@ -8750,10 +9275,11 @@ const World = (() => {
      the auth header for /api/ URLs, matching every other frontend fetch. */
   function fetchSnapshot() {
     if (typeof fetch === 'undefined') return;
+    const source = chanES;
     try {
       fetch(apiUrl('/api/state/snapshot'), { cache: 'no-store' })
         .then(r => { if (!r.ok) return null; return r.json(); })
-        .then(snap => { if (snap) { try { reconcileFromSnapshot(snap); } catch (_) {} } })
+        .then(snap => { if (snap && source === chanES && !bridgePaused) { try { reconcileFromSnapshot(snap); bridgeRecovering = false; } catch (_) {} } })
         .catch(() => {});   // endpoint absent / offline: TTL net covers it
     } catch (_) {}
   }
@@ -8944,10 +9470,11 @@ const World = (() => {
     if (!p || !cv) return null;
     const wx = (p.x + (p.w || 1) / 2) * T, wy = (p.y + (p.h || 1) / 2) * T;
     const r = cv.getBoundingClientRect();
+    const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY });
     return {
       id: p.id,
-      clientX: r.left + ((wx * scale + panX) * (r.width / cv.width)),
-      clientY: r.top + ((wy * scale + panY) * (r.height / cv.height))
+      clientX: r.left + c.x * (r.width / cv.width),
+      clientY: r.top + c.y * (r.height / cv.height)
     };
   };
   // E1 verification: report the live link predicate, and force the real chanES closed (a genuine dropped socket)
@@ -9265,6 +9792,7 @@ const World = (() => {
           id: b.id, name: b.name, hero: !!hero,
           tile: t, renderTile: rt, px: Math.round(b.px), py: Math.round(b.py), dir: b.dir, state: b.state,
           goal: b.goal || null, moving: !!b.target, working: !!b.working, sitting: !!b.sitting,
+          waitingApproval: b === agent ? !!awaitPrompt : crewIsAwaiting(b),
           seated: !!b.seated, unplaced: !!b.unplaced, summoned: !!b.summoned,   // summoned = carries the idle inner life (roster bodies must, post-relaunch too)
           visTopPy: (b.visTopPy != null) ? Math.round(b.visTopPy) : null,       // drawn head-top (world px) — the overlay anchor drawBubble/drawNameplate use
           say: (b.say && b.say.text && b.say.until > fnow) ? b.say.text : null,
@@ -9320,6 +9848,7 @@ const World = (() => {
     // the live station document (read-only) — the station-quest generator reads props[] to detect the
     // OUTBOX / MISSION-BOARD standing gaps and to resolve a placement. Null when no station is loaded (headless).
     stationDoc: () => (station && station.doc ? station.doc() : null),
+    renderStats: () => sceneRenderer ? sceneRenderer.stats() : { generation: 'classic' },
     // G1c — the live SlagLog ring (read-only): the most-recent wasted-spend post-mortems the floor has diagnosed.
     // The maintenance-quest generator (maintqueststore.js) tallies these by cause; a recurring cause mints a
     // fix-it quest. Returns a fresh copy (slaglog owns the ring); [] when the log isn't loaded (headless/title).
@@ -9333,9 +9862,10 @@ const World = (() => {
       if (!p) return null;
       const r = cv.getBoundingClientRect();
       const kx = r.width / cv.width, ky = r.height / cv.height;
-      const toScr = (wx, wy) => ({ x: r.left + (wx * scale + panX) * kx, y: r.top + (wy * scale + panY) * ky });
+      const toScr = (wx, wy) => { const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY }); return { x: r.left + c.x * kx, y: r.top + c.y * ky }; };
       const a = toScr(p.x * T, p.y * T), b = toScr((p.x + (p.w || 1)) * T, (p.y + (p.h || 1)) * T);
-      return { left: a.x, top: a.y, right: b.x, bottom: b.y, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
+      const c = toScr((p.x + (p.w || 1) / 2) * T, (p.y + (p.h || 1) / 2) * T);
+      return { left: a.x, top: a.y, right: b.x, bottom: b.y, cx: c.x, cy: c.y };
     },
     heroCaps: (agentId) => {
       if (!station) return [];

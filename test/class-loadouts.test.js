@@ -532,7 +532,7 @@ A.ok(/let buildKit = \[\], buildSkills = \[\], buildEffort = null/.test(mkt), 't
 A.ok(/function buildKitChipsHTML\(\)/.test(mkt), 'the builder renders kit picker chips');
 A.ok(/KIT_PICKABLE = \['dish', 'cabinet', 'notebook', 'workbench', 'studio'\]/.test(mkt),
   'the gear picker offers the shareable station caps only (computer/connector are per-agent manual-bind, excluded)');
-A.ok(/STATION GEAR IT DRAWS ON/.test(mkt), 'the custom builder labels the gear picker "STATION GEAR IT DRAWS ON" (shared-gear, informational)');
+A.ok(/Choose at least one tool this class will use/.test(mkt), 'the custom builder explains the tool picker in plain language');
 A.ok(/data-skill=/.test(mkt) && /loadSkillCatalog\(\)\.then/.test(mkt.slice(mkt.indexOf('function wireBuildForm'))),
   'the skill picker is populated from the live skill catalog');
 A.ok(/data-effort=/.test(mkt), 'the builder has a reasoning-effort selector');
@@ -573,12 +573,12 @@ A.ok(/view = 'build'/.test(editWireSeg), 'EDIT opens the builder form (with the 
 // the builder form is edit-aware: it prefills name/emoji/tagline/purpose/manual from the spec and re-labels the CTA.
 const bfhSeg = mkt.slice(mkt.indexOf('function buildFormHTML('), mkt.indexOf('const KIT_PICKABLE'));
 A.ok(/const editing = editingId \? Specialties\.get\(editingId\) : null/.test(bfhSeg), 'buildFormHTML resolves the class being edited');
-A.ok(/EDIT CUSTOM CLASS/.test(bfhSeg), 'the builder titles itself EDIT CUSTOM CLASS when editing');
+A.ok(/Edit custom class/.test(bfhSeg), 'the builder titles itself EDIT CUSTOM CLASS when editing');
 A.ok(/SAVE CHANGES/.test(bfhSeg), 'the edit CTA reads SAVE CHANGES (not CREATE CLASS)');
 A.ok(/value="' \+ esc\(d\.name \|\| ''\)/.test(bfhSeg) && /value="' \+ esc\(d\.tagline \|\| ''\)/.test(bfhSeg), 'the builder prefills name + tagline from the spec');
 A.ok(/esc\(d\.purpose \|\| ''\)/.test(bfhSeg) && /esc\(d\.manual \|\| ''\)/.test(bfhSeg), 'the builder prefills purpose + standing orders from the spec');
 // HONESTY: the edit copy states editing does NOT retroactively mutate already-summoned agents (they own their loadout).
-A.ok(/already-summoned agents keep the loadout they were given/.test(bfhSeg), 'the edit copy is honest: editing a class does not mutate already-summoned agents');
+A.ok(/Existing crew members keep their settings/.test(bfhSeg), 'the edit copy is honest: editing a class does not mutate already-summoned agents');
 // the CREATE/SAVE handler upserts by id when editing (same record) and preserves non-authored carried fields.
 A.ok(/if \(editing\) spec\.id = editing\.id/.test(createSeg), 'SAVE CHANGES upserts the SAME record id when editing (not a new class)');
 A.ok(/Object\.assign\(\{\}, editing \|\| \{\}/.test(createSeg), 'editing starts from the saved record so carried fields (persona/tags/starters) survive');
@@ -609,12 +609,37 @@ A.ok(/return baseModel \|\|/.test(rtm), 'an unpinned tier still falls back to th
 A.ok(/CLASS TIER MODELS/.test(sui), 'SETTINGS surfaces a CLASS TIER MODELS mapping');
 A.ok(/TIER_MODELS_KEY = 'starnet\.tierModels\.v1'/.test(sui), 'the settings writer uses the SAME key app.js reads (no new plumbing)');
 A.ok(/function wireTierModels\(body\)/.test(sui) && /wireTierModels\(host\)/.test(sui), 'the tier-model picker is wired into buildSettings');
-// The selects are still filled from the LIVE catalog, now through the shared `openRouterCatalog()` memo: the
-// fallback-chain picker wants the same list, and fetching it per-picker per-rebuild meant one SETTINGS open
-// fetched the catalog 12 times (a call the sidecar may proxy upstream). Assert the seam, not the URL literal.
-A.ok(/openRouterCatalog\(\)/.test(sui.slice(sui.indexOf('function wireTierModels'))), 'the tier-model selects are filled from the live model catalog');
+// Tier choices follow the active provider. The fallback chain retains its OpenRouter accessor.
+A.ok(/Harness\.api\.get\('\/api\/models\/' \+ encodeURIComponent\(provider\)/.test(sui.slice(sui.indexOf('function wireTierModels'))), 'the tier-model selects use the active provider catalog');
 A.ok(/function openRouterCatalog\(\)[\s\S]{0,400}models\/openrouter/.test(sui), 'and that shared accessor is the live /api/models/openrouter catalog');
-const tmSeg = sui.slice(sui.indexOf('function wireTierModels'), sui.indexOf('function wireTierModels') + 2200);
+const tmSeg = sui.slice(sui.indexOf('function wireTierModels'), sui.indexOf('  // P1-8 NOTIFICATION'));
 A.ok(/writeTierModels\(map\)/.test(tmSeg), 'a tier-model pick persists to the store on change');
+
+// Rebuilding search results reuses the stage. Arrow keys must still move exactly one
+// card/row after repeated wiring, rather than firing every prior search's listener.
+{
+  const document = { activeElement: null };
+  const listeners = new Set();
+  const cards = Array.from({ length: 6 }, (_, i) => ({
+    dataset: { id: 'class-' + i }, offsetTop: Math.floor(i / 2) * 100,
+    classList: { contains: name => name === 'mkt-card' },
+    focus() { document.activeElement = this; }
+  }));
+  const scope = {
+    querySelectorAll: () => cards, contains: card => cards.includes(card),
+    addEventListener: (_, fn) => listeners.add(fn),
+    removeEventListener: (_, fn) => listeners.delete(fn)
+  };
+  const source = mkt.slice(mkt.indexOf('  function wireGridNav('), mkt.indexOf('  function wireProspect('));
+  const sandbox = { document, tab: 'agents', focusAgent: 'class-0', focusRecipe: null };
+  require('node:vm').runInNewContext(source + '\nthis.wire = wireGridNav;', sandbox);
+  for (let i = 0; i < 4; i++) sandbox.wire(scope);
+  A.eq(listeners.size, 1, 'repeated searches keep a single grid keyboard listener');
+  cards[0].focus();
+  for (const fn of listeners) fn({ key: 'ArrowRight', preventDefault() {} });
+  A.eq(document.activeElement, cards[1], 'right arrow moves one card after repeated search renders');
+  for (const fn of listeners) fn({ key: 'ArrowDown', preventDefault() {} });
+  A.eq(document.activeElement, cards[3], 'down arrow moves one two-column gallery row');
+}
 
 A.report('class-loadouts');

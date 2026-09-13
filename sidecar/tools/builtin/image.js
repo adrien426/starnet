@@ -1,7 +1,7 @@
 /* sidecar/tools/builtin/image.js — the STUDIO capability: image_generate(prompt) + image_analyze(image).
 
-   Both skills ride the SAME BYOK OpenRouter key the agent already uses, hitting the chat-completions
-   endpoint — no new provider, no new key, fully additive (matches the web.js pattern exactly):
+   Generation rides the media route resolved by the host: OpenRouter-compatible chat completions or
+   OpenAI's dedicated Images API. Credentials remain paired with their provider endpoint.
 
      image_generate  : POST /chat/completions with modalities:['image','text']. The model returns a
                        base64 data-URL PNG in choices[0].message.images[]; we decode it and save it into
@@ -31,6 +31,8 @@
   'use strict';
 
   const DEFAULT_OR_URL = 'https://openrouter.ai/api/v1/chat/completions';
+  const DEFAULT_OPENAI_IMAGE_URL = 'https://api.openai.com/v1/images/generations';
+  const OPENAI_IMAGE_MODEL = 'gpt-image-2';
   // 2026-07-07 image-quality escape: the old default (gemini-2.5-flash-image, "Nano Banana 1") is the OLDEST
   // image model in the live OpenRouter catalog — garbled text on UI mockups/marketing assets was its signature.
   // Default = current-gen fast (Nano Banana 2); PREMIUM = Nano Banana Pro (built for legible text / hero art);
@@ -104,11 +106,22 @@
   const EXT_BY_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
   const MIME_BY_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 
-  function withTimeout(promiseFactory, ms) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    return Promise.resolve(promiseFactory(ctrl.signal)).finally(() => clearTimeout(t));
+  function checkCancelled(signal) {
+    if (signal && signal.aborted) {
+      const error = new Error('Image operation cancelled; no image was published. Upstream work may already have been billed.');
+      error.name = 'AbortError'; throw error;
+    }
   }
+  async function withTimeout(promiseFactory, ms, parentSignal) {
+    checkCancelled(parentSignal);
+    const ctrl = new AbortController();
+    const abort = () => ctrl.abort();
+    if (parentSignal) parentSignal.addEventListener('abort', abort, { once: true });
+    const t = setTimeout(abort, ms);
+    try { return await promiseFactory(ctrl.signal); }
+    finally { clearTimeout(t); if (parentSignal) parentSignal.removeEventListener('abort', abort); }
+  }
+  let publicationSequence = 0;
 
   // Pull the first image (data-URL or http URL) out of an OpenRouter chat-completions response. Providers vary:
   // most return choices[0].message.images[] = [{type:'image_url', image_url:{url}}], but some nest the image in
@@ -127,6 +140,18 @@
     if (Array.isArray(msg.images)) { for (const im of msg.images) { const u = imageUrlFromPart(im); if (u) return u; } }
     if (Array.isArray(msg.content)) { for (const p of msg.content) { if (p && (p.type === 'image_url' || p.type === 'output_image' || p.image_url || p.url)) { const u = imageUrlFromPart(p); if (u) return u; } } }
     return '';
+  }
+  function parseOpenAIImageResponse(data) {
+    const item = data && Array.isArray(data.data) && data.data[0];
+    if (!item) return '';
+    if (item.b64_json) return 'data:image/png;base64,' + item.b64_json;
+    return String(item.url || '');
+  }
+  function openAIImageSize(shape) {
+    if (!shape || !shape.ratio) return '1024x1024';
+    const parts = String(shape.ratio).split(':').map(Number);
+    const ratio = parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : 1;
+    return ratio > 1.05 ? '1536x1024' : ratio < 0.95 ? '1024x1536' : '1024x1024';
   }
   // Any plain text the model emitted alongside the image (e.g. a caption / refusal). Used for the tool summary.
   function textFromResponse(data) {
@@ -154,13 +179,19 @@
     deps = deps || {};
     const or = deps.openrouter || {};
     const apiKey = or.apiKey || deps.apiKey || '';
+    const protocol = or.protocol || 'openrouter-chat';
+    const providerLabel = or.provider === 'starnet' ? 'StarNet' : (or.provider === 'openai' ? 'OpenAI' : 'OpenRouter');
     const orBaseUrl = String(or.baseUrl || deps.baseUrl || '').trim().replace(/\/+$/, '');
     const orUrl = orBaseUrl ? orBaseUrl + '/chat/completions' : DEFAULT_OR_URL;
+    const openAIImageUrl = orBaseUrl ? orBaseUrl + '/images/generations' : DEFAULT_OPENAI_IMAGE_URL;
     const fsp = deps.fsp, P = deps.pathMod, ROOT = deps.root;
     if (!fsp || !P || !ROOT) throw new Error('image.js requires { fsp, pathMod, root }');
     const doFetch = deps.fetchImpl || (typeof fetch !== 'undefined' ? fetch : null);
     if (!doFetch) throw new Error('image.js requires global fetch (Node 18+) or deps.fetchImpl');
-    const IMAGE_MODEL  = deps.imageModel  || DEFAULT_IMAGE_MODEL;
+    const configuredImageModel = String(deps.imageModel || '').trim();
+    const IMAGE_MODEL  = protocol === 'openai-images'
+      ? (/^(?:gpt-image-|dall-e-)/i.test(configuredImageModel) ? configuredImageModel : OPENAI_IMAGE_MODEL)
+      : (configuredImageModel || DEFAULT_IMAGE_MODEL);
     const VISION_MODEL = deps.visionModel || or.model || DEFAULT_VISION_MODEL;
     // Auxiliary vision route: a one-shot text answer from the RUN's own provider/model (injected by the run
     // host). Used when no OpenRouter key exists — and as the rescue when the OpenRouter call FAILS (dead key,
@@ -176,17 +207,46 @@
       ctx.emit('deliverable', d);
     }
 
-    async function orPost(body, timeoutMs) {
-      if (!apiKey) throw new Error('STUDIO image generation is unavailable: no OpenRouter API key is connected. Open SETTINGS > PROVIDERS and connect OpenRouter, then retry; no image was produced.');
+    async function orPost(body, timeoutMs, parentSignal) {
+      checkCancelled(parentSignal);
+      if (!apiKey) throw new Error('STUDIO image generation is unavailable: no media connection is configured. Open SETTINGS and connect an OpenRouter API key for image generation, or link this station to your StarNet account, then retry; no image was produced.');
       const res = await withTimeout(signal => doFetch(orUrl, {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://starnet.local', 'X-Title': 'STARNET' },
         body: JSON.stringify(body),
         signal
-      }).then(async r => ({ status: r.status, json: await r.json().catch(() => null), text: null })), timeoutMs);
+      }).then(async r => {
+        const json = await r.json().catch(require('../../failopen.js').swallow('image.openrouter.response-json', null));
+        // Book the provider's response before checking cancellation or decoding the artifact.
+        // A billed refusal, failed download, or cancelled publication still incurred this cost.
+        if (typeof deps.onUsage === 'function' && (r.status >= 200 && r.status < 300 || json && json.usage)) {
+          deps.onUsage(json && json.usage, body.model);
+        }
+        return { status: r.status, json, text: null };
+      }), timeoutMs, parentSignal || deps.signal);
       if (res.status < 200 || res.status >= 300) {
         const errMsg = res.json && res.json.error && (res.json.error.message || res.json.error) || ('http ' + res.status);
-        throw new Error('OpenRouter ' + res.status + ': ' + (typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg)));
+        throw new Error(providerLabel + ' ' + res.status + ': ' + (typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg)));
+      }
+      return res.json || {};
+    }
+
+    async function openAIImagePost(body, timeoutMs, parentSignal) {
+      checkCancelled(parentSignal);
+      if (!apiKey) throw new Error('STUDIO image generation is unavailable: no media connection is configured. Open SETTINGS and connect an OpenAI or OpenRouter API key for image generation, or link this station to your StarNet account, then retry; no image was produced.');
+      const res = await withTimeout(signal => doFetch(openAIImageUrl, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal
+      }).then(async r => {
+        const json = await r.json().catch(require('../../failopen.js').swallow('image.openai.response-json', null));
+        if (typeof deps.onUsage === 'function' && (r.status >= 200 && r.status < 300 || json && json.usage)) deps.onUsage(json && json.usage, body.model);
+        return { status: r.status, json };
+      }), timeoutMs, parentSignal || deps.signal);
+      if (res.status < 200 || res.status >= 300) {
+        const errMsg = res.json && res.json.error && (res.json.error.message || res.json.error) || ('http ' + res.status);
+        throw new Error('OpenAI ' + res.status + ': ' + (typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg)));
       }
       return res.json || {};
     }
@@ -196,9 +256,11 @@
       name: 'image_generate', capability: 'studio', scope: 'write', requiresConsent: true, timeoutMs: GEN_TIMEOUT_MS + 15000,
       description: 'Generate an image from a text prompt and SAVE it into your workspace (returns the saved path + a viewer URL). ' +
         'Use for any "draw / create / generate an image of …" request. Optional "model" picks the image model: ' +
-        'default ' + DEFAULT_IMAGE_MODEL + ' (fast, current-gen). For HERO/MARKETING assets or ANY image that must show ' +
-        'READABLE TEXT (UI mockups, landing pages, posters, infographics, product concepts), pass model:"' + PREMIUM_IMAGE_MODEL + '" ' +
-        '— it renders legible text; the fast tier garbles it. Optional "path" sets the output filename. ' +
+        (protocol === 'openai-images'
+          ? 'default ' + OPENAI_IMAGE_MODEL + ' through the connected OpenAI Images API. Optional "path" sets the output filename. '
+          : 'default ' + DEFAULT_IMAGE_MODEL + ' (fast, current-gen). For HERO/MARKETING assets or ANY image that must show ' +
+            'READABLE TEXT (UI mockups, landing pages, posters, infographics, product concepts), pass model:"' + PREMIUM_IMAGE_MODEL + '" ' +
+            '— it renders legible text; the fast tier garbles it. Optional "path" sets the output filename. ') +
         'Optional "aspect_ratio" sets the image shape — ANY ratio or size works: "16:9", "4:3", "1920x1080", "1.5", ' +
         'or a word like "landscape"/"portrait"/"wide"/"tall"/"banner"/"story" (default 1:1; the provider renders the nearest of ' +
         ASPECT_RATIOS.join(', ') + '). Optional "width"+"height" (pixels, max ' + MAX_OUTPUT_PX + ') deliver an EXACT resolution — ' +
@@ -213,10 +275,14 @@
         height: { type: 'integer', minimum: 16, maximum: MAX_OUTPUT_PX }
       } },
       run: async (args, ctx) => {
+        const signal = ctx && ctx.signal;
+        checkCancelled(signal);
         const aid = (ctx && ctx.agentId) || 'agent';
         const prompt = String(args.prompt || '').trim();
         if (!prompt) throw new Error('prompt is required');
-        let model = String(args.model || IMAGE_MODEL);
+        const requestedModel = String(args.model || IMAGE_MODEL).trim();
+        let model = protocol === 'openai-images' && !/^(?:gpt-image-|dall-e-)/i.test(requestedModel)
+          ? IMAGE_MODEL : requestedModel;
         // Aspect ratio rides OpenRouter's image_config passthrough — prose in the prompt is
         // mostly ignored by the Gemini image models, so this field is the only real dial.
         const shape = resolveShape(args.aspect_ratio, args.width, args.height);
@@ -226,25 +292,26 @@
             'a WxH size like 1920x1080, a word like landscape/portrait, or both width and height (16..' + MAX_OUTPUT_PX + 'px); no image was produced.');
         }
         const aspect = shape.ratio;
-        const baseBody = {
-          messages: [{ role: 'user', content: prompt }],
-          modalities: ['image', 'text']
-        };
+        const baseBody = { messages: [{ role: 'user', content: prompt }], modalities: ['image', 'text'] };
         if (aspect) baseBody.image_config = { aspect_ratio: aspect };
         let data;
-        try {
-          data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS);
+        if (protocol === 'openai-images') {
+          data = await openAIImagePost({ model, prompt, size: openAIImageSize(shape) }, GEN_TIMEOUT_MS, signal);
+        } else try {
+          data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS, signal);
         } catch (e) {
           // slug-drift safety net: if the CHOSEN model is rejected as unknown/unavailable (400/404 "not a valid
           // model" / "no endpoints"), retry ONCE on the known-good legacy slug instead of failing the whole task.
           // Only for model-shaped rejections — a rate-limit/timeout/content error propagates untouched.
+          checkCancelled(signal);
           const msg = String((e && e.message) || e);
           const modelish = /\b(400|404)\b/.test(msg) && /model|endpoint/i.test(msg);
           if (!modelish || model === LEGACY_IMAGE_MODEL) throw e;
           model = LEGACY_IMAGE_MODEL;
-          data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS);
+          data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS, signal);
         }
-        const url = parseImageFromResponse(data);
+        checkCancelled(signal);
+        const url = protocol === 'openai-images' ? parseOpenAIImageResponse(data) : parseImageFromResponse(data);
         if (!url) {
           const txt = textFromResponse(data);
           throw new Error('model returned no image' + (txt ? ' (' + txt.slice(0, 200) + ')' : '') + ' — is "' + model + '" an image-output model?');
@@ -253,10 +320,11 @@
         let mime, buffer;
         if (/^data:/i.test(url)) { ({ mime, buffer } = dataUrlToBuffer(url)); }
         else if (/^https?:\/\//i.test(url)) {
-          const r = await withTimeout(signal => doFetch(url, { signal }).then(async rr => ({ status: rr.status, ab: await rr.arrayBuffer(), ct: rr.headers.get('content-type') || 'image/png' })), 30000);
+          const r = await withTimeout(signal => doFetch(url, { signal }).then(async rr => ({ status: rr.status, ab: await rr.arrayBuffer(), ct: rr.headers.get('content-type') || 'image/png' })), 30000, signal);
           if (r.status < 200 || r.status >= 300) throw new Error('could not download generated image (http ' + r.status + ')');
           mime = String(r.ct).split(';')[0].toLowerCase(); buffer = Buffer.from(r.ab);
         } else throw new Error('unrecognized image reference from model');
+        checkCancelled(signal);
         if (buffer.length > MAX_IMAGE_BYTES) throw new Error('generated image too large (' + buffer.length + ' bytes)');
         // exact pixel request: fit the nearest-ratio render to the asked-for size (cover-crop, centred)
         let sizeNote = '';
@@ -276,9 +344,23 @@
           rel = 'images/gen-' + h + ext;
         }
         const { abs } = await jail.resolveInside(aid, rel);   // throws on jail escape / abs / '..'
+        checkCancelled(signal);
         await fsp.mkdir(P.dirname(abs), { recursive: true });
-        await fsp.writeFile(abs, buffer);
-        emitDeliverable(ctx, aid, rel);
+        checkCancelled(signal);
+        // Stage bytes separately: abort during a write must not truncate an existing output.
+        const staging = abs + '.pending-' + process.pid + '-' + (++publicationSequence);
+        try {
+          await fsp.writeFile(staging, buffer, { flag: 'wx' });
+          checkCancelled(signal);
+          // A bounded atomic publication in the same event-loop turn as the cancellation check.
+          // An acknowledged cancel cannot interleave between this fence and the rename/event.
+          require('node:fs').renameSync(staging, abs);
+          emitDeliverable(ctx, aid, rel);
+        } finally {
+          await fsp.unlink(staging).catch(e => {
+            if (!e || e.code !== 'ENOENT') require('../../failopen.js').note('image.staging-cleanup', e);
+          });
+        }
         const viewer = '/api/file?agent=' + encodeURIComponent(aid) + '&path=' + encodeURIComponent(rel);
         const caption = textFromResponse(data);
         const kb = (buffer.length / 1024).toFixed(0) + ' KB';
@@ -325,7 +407,8 @@
         { type: 'text', text: q },     // text first, then image — OpenRouter's recommended order
         { type: 'image_url', image_url: { url } }
       ];
-      if (!apiKey) {
+      const canUseOpenRouterVision = protocol === 'openrouter-chat' && !!apiKey;
+      if (!canUseOpenRouterVision) {
         if (!auxVision) throw new Error('no vision route available — no OpenRouter API key is connected and no session provider is wired');
         return analyzeViaAux(content);
       }
@@ -370,7 +453,7 @@
     // returns the model's answer. Honest failure (no route) propagates as a thrown Error which
     // browser.vision converts to an 'vision unavailable' result. auxVision counts as a route:
     // a keyless session on a vision-capable provider still gets browser.vision.
-    const hasVision = !!apiKey || !!auxVision;
+    const hasVision = (protocol === 'openrouter-chat' && !!apiKey) || !!auxVision;
     async function browserVision({ imageBase64, question }) {
       const url = 'data:image/png;base64,' + String(imageBase64 || '');
       return clip(await analyzeImageUrl(url, question));
@@ -378,7 +461,7 @@
 
     return {
       generateTool, analyzeTool, analyzeImageUrl, browserVision, hasVision,
-      _internals: { parseImageFromResponse, textFromResponse, dataUrlToBuffer, imageUrlFromPart, imageToUrl, analyzeImageUrl, resolveShape, fitToSize },
+      _internals: { parseImageFromResponse, parseOpenAIImageResponse, openAIImageSize, textFromResponse, dataUrlToBuffer, imageUrlFromPart, imageToUrl, analyzeImageUrl, resolveShape, fitToSize },
       register(reg) { reg.register(generateTool); reg.register(analyzeTool); return reg; }
     };
   }

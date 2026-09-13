@@ -29,6 +29,20 @@ const bi = build.indexOf(BEGIN), ei = build.indexOf(END);
 A.ok(bi > 0 && ei > bi, 'the pure block is marked in build.js');
 const block = build.slice(build.indexOf('*/', bi) + 2, build.lastIndexOf('/*', ei));
 const pure = new Function(block + '\nreturn { loopExitLabels, loopBackTxt, sampleResultView };')();
+const wbi = build.indexOf('REFIT-WORKFLOW-PURE-BEGIN'), wei = build.indexOf('REFIT-WORKFLOW-PURE-END');
+const workflow = new Function(build.slice(build.indexOf('*/', wbi) + 2, build.lastIndexOf('/*', wei)) + '\nreturn workflowReadout;')();
+{
+  const comp = { intakes: ['in'], bays: [{ propId: 'a', agentId: 'writer' }, { propId: 'b', agentId: 'reviewer' }, { propId: 'c', role: 'Publish' }] };
+  const plan = { reach: { writer: true }, chains: { writer: { next: ['reviewer', 'writer'] }, reviewer: { next: [], outbox: true } } };
+  const read = workflow(comp, plan, a => a.toUpperCase());
+  A.eq(read.steps[0].sends, 'REVIEWER / WRITER', 'branch and loop destinations retain real graph edges, not invented stage order');
+  A.eq(read.steps[2].agent, 'Choose an agent', 'unassigned step has an actionable label');
+  A.eq(read.steps[2].sends, 'No confirmed onward route', 'unbound steps do not claim routing');
+  A.eq(read.result, 'Connected to a results outbox', 'output connection comes from compiled chain');
+  A.eq(workflow(comp, null, a => a).result, 'No confirmed route to an outbox', 'missing plan never claims successful result');
+  plan.chains.reviewer = { next: [], deadEnd: true };
+  A.ok(/Disconnected end/.test(workflow(comp, plan, a => a).steps[1].sends), 'disconnected output names the recovery action');
+}
 
 // a real floor: INBOX → WRITER → LOOP gate; gate E → REVIEWER → OUTBOX, gate S → belt back to WRITER
 {
@@ -55,6 +69,9 @@ const pure = new Function(block + '\nreturn { loopExitLabels, loopBackTxt, sampl
   A.ok(plan.junctions[tile.x + ',' + tile.y] && plan.junctions[tile.x + ',' + tile.y].kind === 'loop', 'the compiler sees the gate');
 
   const names = { writer: 'Writer', reviewer: 'Reviewer' };
+  const overview = workflow(P.lineComponents(geo).find(c => c.bays.some(b => b.agentId === 'writer')), plan, a => names[a] || a);
+  A.ok(overview.steps.some(s => s.label === 'Writer'), 'real compiled floor names its bound step');
+  A.ok(overview.steps.some(s => s.sends.includes('Reviewer')), 'real compiled floor exposes onward destination');
   const exits = pure.loopExitLabels(plan, tile, a => names[a] || a);
   const byDir = {}; for (const x of exits) byDir[x.dir] = x;
   A.eq(exits.length, 2, 'the gate has exactly two exits (E onward, S back)');
@@ -119,7 +136,7 @@ A.ok(/class="bb sm loop-exit/.test(flow) && /loopExitLabels\(valPlan/.test(flow)
 A.ok(/loop-when/.test(flow) && /\['code', 'CODE'\], \['research', 'RESEARCH'\], \['general', 'GENERAL'\]/.test(flow),
   'LOOP verdict tag is a pick of the ONLY tags the classifier can produce (a typed "approved" could never match)');
 A.ok(/\['approved', 'APPROVED'\], \['revise', 'REVISE'\]/.test(flow) && /loop-verdict/.test(flow), 'LOOP verdict picks: APPROVED / REVISE (the words routing/verdict.js parses) sit beside the classifier tags (2026-08-22)');
-A.ok(/loopRuleTxt\(p\.when, loopMaxDef\)/.test(flow) && /loopRuleTxt\(res\.when/.test(flow), 'the card copy AND the saved-note read the ONE rule text (loopRuleTxt) — never two wordings of the gate');
+A.ok(/loopRuleTxt\(p\.when, p\.maxIter \|\| loopMaxDef\)/.test(flow) && /loopRuleTxt\(res\.when/.test(flow), 'the card copy and saved-note use the same rule, including the saved pass limit');
 A.ok(/goes round until the reviewer’s last line says VERDICT: ' \+ when/.test(build) && /or MAX PASSES/.test(build) && /marked unapproved/.test(build), 'the verdict rule copy: round until VERDICT: <word> or MAX PASSES, then DONE marked unapproved — what chain.js runs');
 A.ok(/goes round again ONLY while the reviewer’s output reads as/.test(build), 'the classifier-tag rule copy is unchanged: the tag keeps it looping, anything else leaves on DONE');
 A.ok(/station\.configureJunction\(propId, Object\.keys\(cfg\)\.length \? cfg : null\)/.test(flow), 'gate saves go through configureJunction (the validated model path)');
@@ -131,7 +148,9 @@ A.ok(!/JSON\.stringify\(plan\.(junctions|gate)/.test(src('world.js')), 'nothing 
 // palette purposes: every WORKFLOW machine has a one-line purpose in the tile tooltip
 const pm = build.slice(build.indexOf('const PALETTE_PURPOSE'), build.indexOf('const THUMB_PAD'));
 for (const id of ['intake', 'bay', 'filter', 'merger', 'splitter', 'joiner', 'loop', 'outbox']) A.ok(new RegExp('\\b' + id + ': \'').test(pm), 'palette purpose for ' + id);
-A.ok(/b\.title = c\.label \+ ' · ' \+ c\.w \+ '×' \+ c\.h[^\n]*purpose/.test(build), 'the tile title carries the purpose (tooltip.js adopts it)');
+A.ok(/b\.setAttribute\('aria-description', c\.label[^\n]*purpose/.test(build), 'the tile accessible description carries the purpose');
+const tile = build.slice(build.indexOf('function propTile('), build.indexOf('function renderPropPreview('));
+A.ok(/setAttribute\('data-tip'/.test(tile) && !/b\.title\s*=|setAttribute\('data-no-tip'/.test(tile), 'catalog tiles use the shared brief tooltip without a native bubble');
 A.ok(/wait here/i.test(pm) && /straight through/.test(pm), 'MERGER (rides straight through) vs JOINER (branches wait) are distinguishable by tooltip alone');
 
 // sample-run feedback: rendered on the card, scoped to its line, ③ ticks only on delivered
@@ -147,9 +166,9 @@ A.ok(!/sample job dispatched — watch the line/.test(fin), 'the old fire-and-fo
 const step = build.slice(build.indexOf('function lineFactHTML'), build.indexOf('function openWorkstationPicker'));
 A.ok(/data-linefact=/.test(step) && /function refreshLineFacts/.test(step), 'the ON <LINE> fact is addressable and refreshable');
 A.ok(/renderFinCard\(\);\n\s*refreshLineFacts\(\);/.test(build), 'line facts refresh after every plan recompile (click-connect lands on the open card)');
-A.ok(/needs a PC assigned to <b>/.test(step), 'the compute rule says WHOSE PC, in THIS room');
+A.ok(/esc\(agentLabel\(p\.agentId\)\) \+ ' needs an assigned workstation in this room/.test(step), 'the workstation requirement names the assigned agent and room');
 A.ok(/station\.addProp\(\{ t: 'desk', x, y, w: 2, h: 1, agentId: p\.agentId \}\)/.test(step), 'the one-click fix places a real desk in the room, bound to the agent (object=capability)');
-A.ok(/'crewed by ' \+ esc\(agentLabel\(cur\)\)/.test(step) && /'crewed by ' \+ agentLabel\(aid\)/.test(step), 'crewed-by shows the display name, never the raw id');
+A.ok(/'Assigned to ' \+ esc\(agentLabel\(cur\)\)/.test(step) && /'Assigned to ' \+ agentLabel\(aid\)/.test(step), 'assignment shows the display name, never the raw id');
 
 // FINISH card follows the focused line; coach bubbles stack
 A.ok(/function finFocusLine\(propId\)/.test(build), 'a focus-line helper exists');

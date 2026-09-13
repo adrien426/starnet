@@ -78,6 +78,22 @@ function jsonResp(obj, status) { return { status: status || 200, json: async () 
   await TB.generateTool.run({ prompt: 'local route' }, ctx);
   A.eq(baseFetch.calls[0].url, 'http://127.0.0.1:43210/api/v1/chat/completions', 'image_generate honors the configured OpenRouter base URL');
 
+  // OpenAI keys use the dedicated Images API. gpt-image-2 is the media model inside STUDIO,
+  // never a streaming chat agent.
+  const openAIFetch = stubFetch(() => jsonResp({ data: [{ b64_json: PNG_B64 }], usage: { input_tokens: 8, output_tokens: 16 } }));
+  const TO = makeImageTools({ openrouter: { apiKey: 'openai-key', provider: 'openai', protocol: 'openai-images', baseUrl: 'https://api.openai.com/v1/' }, fsp, pathMod: path, root: ROOT, fetchImpl: openAIFetch });
+  const go = await TO.generateTool.run({ prompt: 'a moonlit landscape', aspect_ratio: '16:9' }, ctx);
+  A.eq(openAIFetch.calls[0].url, 'https://api.openai.com/v1/images/generations', 'OpenAI generation uses /images/generations');
+  A.eq(openAIFetch.calls[0].body, { model: 'gpt-image-2', prompt: 'a moonlit landscape', size: '1536x1024' }, 'OpenAI request uses its native prompt/model/size shape without chat streaming fields');
+  A.eq(openAIFetch.calls[0].init.headers.Authorization, 'Bearer openai-key', 'OpenAI Images API receives the configured OpenAI key');
+  A.ok(/gpt-image-2/.test(TO.generateTool.description) && !/gemini-3-pro-image/.test(TO.generateTool.description), 'OpenAI STUDIO teaches the model valid for its route');
+  A.ok(go.summary.indexOf('image → ') === 0, 'OpenAI base64 output is saved as an image artifact');
+  A.eq(TO.hasVision, false, 'an OpenAI generation-only route does not falsely advertise chat vision');
+  const invalidOverrideFetch = stubFetch(() => jsonResp({ data: [{ b64_json: PNG_B64 }] }));
+  const TOInvalidOverride = makeImageTools({ openrouter: { apiKey: 'openai-key', provider: 'openai', protocol: 'openai-images' }, imageModel: 'google/gemini-3-pro-image', fsp, pathMod: path, root: ROOT, fetchImpl: invalidOverrideFetch });
+  await TOInvalidOverride.generateTool.run({ prompt: 'route-safe model', model: 'recraft/recraft-v4' }, ctx);
+  A.eq(invalidOverrideFetch.calls[0].body.model, 'gpt-image-2', 'an OpenRouter IMAGE_MODEL override cannot cross onto the OpenAI Images API');
+
   // ---- B1b. aspect_ratio rides image_config; default stays bare (no image_config); bad value refused pre-flight ----
   const gAr = await T1.generateTool.run({ prompt: 'a wide vista', aspect_ratio: '16:9' }, ctx);
   A.ok(gAr.summary.indexOf('image → ') === 0, 'aspect_ratio call still saves an image');
@@ -162,7 +178,7 @@ function jsonResp(obj, status) { return { status: status || 200, json: async () 
 
   // ---- G. no API key -> clean, actionable error ----
   const T4 = makeImageTools({ openrouter: { apiKey: '' }, fsp, pathMod: path, root: ROOT, fetchImpl: async () => jsonResp({}) });
-  let noKey = false; try { await T4.generateTool.run({ prompt: 'q' }, ctx); } catch (e) { noKey = /API key/i.test(e.message); }
+  let noKey = false; try { await T4.generateTool.run({ prompt: 'q' }, ctx); } catch (e) { noKey = /media connection/i.test(e.message); }
   A.ok(noKey, 'image_generate errors helpfully when no OpenRouter key is configured');
 
   // ---- H. browserVision: reusable vision callback for browser.vision ----
@@ -241,10 +257,56 @@ function jsonResp(obj, status) { return { status: status || 200, json: async () 
     A.ok(/may not support vision/.test(empty), 'empty session answer surfaces as a not-vision-capable error');
 
     // I5. image_generate is UNCHANGED: still requires the OpenRouter key even when auxVision exists
-    let genKey = false; try { await TA.generateTool.run({ prompt: 'x' }, ctx); } catch (e) { genKey = /API key/i.test(e.message); }
-    A.ok(genKey, 'image_generate still needs the OpenRouter key (image OUTPUT genuinely requires it)');
+    let genKey = false; try { await TA.generateTool.run({ prompt: 'x' }, ctx); } catch (e) { genKey = /media connection/i.test(e.message); }
+    A.ok(genKey, 'image_generate requires a media route; a vision callback alone cannot generate images');
   }
 
+  // Cancellation fences: providers may ignore abort and a staged write may complete late.
+  for (const phase of ['before', 'response', 'download', 'write']) {
+    const ac = new AbortController(), bills = [], delivered = [];
+    const aid = 'cancel-' + phase, rel = 'existing.png';
+    const abs = path.join(ROOT, aid, rel);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, 'original-image');
+    let fetched = 0;
+    const injectedFs = Object.assign({}, fsp, { writeFile: async (...args) => {
+      await fsp.writeFile(...args);
+      if (phase === 'write' && String(args[0]).includes('.pending-')) ac.abort();
+    } });
+    const tools = makeImageTools({ openrouter: { apiKey: 'fixture' }, fsp: injectedFs, pathMod: path, root: ROOT,
+      onUsage: usage => bills.push(usage), fetchImpl: async url => {
+        fetched++;
+        if (phase === 'response') ac.abort();
+        if (String(url).endsWith('/output.png')) {
+          ac.abort();
+          return { status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => Buffer.from(PNG_B64, 'base64') };
+        }
+        return jsonResp({ usage: { cost: .025 }, choices: [{ message: { images: [{ image_url: { url: phase === 'download' ? 'https://fixture.invalid/output.png' : DATA_URL } }] } }] });
+      } });
+    if (phase === 'before') ac.abort();
+    let cancelled = false;
+    try { await tools.generateTool.run({ prompt: 'cube', path: rel }, { agentId: aid, signal: ac.signal, emit: (...args) => delivered.push(args) }); }
+    catch (e) { cancelled = e.name === 'AbortError'; }
+    A.ok(cancelled, phase + ': cancellation propagates');
+    A.eq(await fsp.readFile(abs, 'utf8'), 'original-image', phase + ': existing output remains intact');
+    A.eq(delivered.length, 0, phase + ': no deliverable emitted');
+    A.eq((await fsp.readdir(path.dirname(abs))).length, 1, phase + ': staged bytes cleaned up');
+    A.eq(bills.length, phase === 'before' ? 0 : 1, phase + ': received charge retained once despite cancellation');
+    if (phase === 'before') A.eq(fetched, 0, 'already cancelled dispatch makes no paid request');
+  }
+  // Unexpected cleanup failures stay observable without turning a published image into a failed run.
+  {
+    const failopen = require('../sidecar/failopen.js');
+    const before = failopen.counts()['image.staging-cleanup'] || 0;
+    const injectedFs = Object.assign({}, fsp, { unlink: async () => { throw Object.assign(new Error('fixture cleanup denied'), { code: 'EACCES' }); } });
+    const tools = makeImageTools({ openrouter: { apiKey: 'fixture' }, fsp: injectedFs, pathMod: path, root: ROOT,
+      fetchImpl: async () => jsonResp({ choices: [{ message: { images: [{ image_url: { url: DATA_URL } }] } }] }) });
+    const delivered = [];
+    const result = await tools.generateTool.run({ prompt: 'cube', path: 'cleanup-proof.png' }, { agentId: 'cleanup', emit: (...args) => delivered.push(args) });
+    A.ok(/cleanup-proof.png/.test(result.content), 'cleanup diagnostic preserves a successfully published result');
+    A.eq(delivered.length, 1, 'cleanup diagnostic does not duplicate the deliverable');
+    A.eq(failopen.counts()['image.staging-cleanup'], before + 1, 'unexpected staging cleanup error is counted');
+  }
   try { await fsp.rm(ROOT, { recursive: true, force: true }); } catch (_) {}
   A.report('image.test');
 })().catch(e => { console.log('FATAL', e && e.stack || e); process.exit(1); });

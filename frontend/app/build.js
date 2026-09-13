@@ -31,32 +31,13 @@ const Build = (() => {
        knows the word for that. Same law as SURFACE above: the LABEL changed, the tool id `reclaim`
        did not (the key map, the drag mode, the model verb and every saved reference key ride it). */
     { id: 'reclaim', key: '5', label: 'DELETE', verb: 'click anything to delete it', hint: 'click a room, prop, or belt to delete it · drag across a belt to clear the whole run (UNDO restores it)', cursor: 'not-allowed' },
-    { id: 'prop', key: '6', label: 'PROP', verb: 'click the deck to place it', hint: 'click to place furniture · agents walk around it', cursor: 'crosshair' },
+    { id: 'prop', key: '6', label: 'PROPS', verb: 'click the deck to place it', hint: 'browse equipment and decoration, then click the deck to place your selection', cursor: 'crosshair' },
     { id: 'belt', key: '7', label: 'BELT', verb: 'click one machine, then another', hint: 'CLICK one machine, then another — the belt lays itself · (or drag to lay tiles by hand)', cursor: 'crosshair' },
-    { id: 'dupe', key: '8', label: 'DUPE', verb: 'click a thing to copy it', hint: 'click a room or prop to copy it · then every click stamps a copy — mirror your build fast', cursor: 'copy' },
-    { id: 'line', key: '9', label: 'LINES', verb: 'pick a line, then click the deck', hint: 'pick a STARTER LINE below, then click the deck — a whole working layout stamps at once, yours to edit', cursor: 'copy' },
+    { id: 'dupe', key: '8', label: 'COPY', verb: 'click a room or prop to copy it', hint: 'click a room or prop to copy it · then every click stamps a copy — mirror your build fast', cursor: 'copy' },
+    { id: 'line', key: '9', label: 'LAYOUTS', verb: 'pick a layout, then click the deck', hint: 'pick a STARTER LINE below, then click the deck — a whole working layout stamps at once, yours to edit', cursor: 'copy' },
   ];
-  /* ---------- TOOL GROUPS (2026-08-07 build-mode overhaul) ----------
-     Ten equal-weight buttons in a flat 2×5 grid is a debug menu, not a build mode: nothing said
-     which tool comes FIRST, which ones change what already exists, or which ones are about work
-     rather than architecture. The same ten verbs now read as four answers to "what am I doing?":
-
-       STRUCTURE  make the space      ROOM · HALLWAY
-       SURFACES   dress it            SURFACE · PROP
-       WORKFLOW   make it run         BELT · LINES
-       EDIT       change what's there MOVE · DUPE · DELETE
-
-     SELECT sits ABOVE the groups on its own full-width row — it is not a fifth kind of building,
-     it's the cursor you fall back to (ESC / right-click / re-clicking the armed tool all land here).
-     Number keys are UNCHANGED: the quest system and the guide card cite them by number
-     (quests.js "drag a BELT (7)"), so grouping reorders the buttons, never the shortcuts. */
-  const TOOL_GROUPS = [
-    { label: 'STRUCTURE', why: 'make the space',       tools: ['room', 'hall'] },
-    { label: 'SURFACES',  why: 'dress it',             tools: ['paint', 'prop'] },
-    { label: 'WORKFLOW',  why: 'make it run',          tools: ['belt', 'line'] },
-    { label: 'EDIT',      why: 'change what is there', tools: ['move', 'dupe', 'reclaim'] },
-    // (no fifth band — SELECT rides its own row above these, see buildDOM)
-  ];
+  // Every tool stays visible. The Select landing offers two starting points without
+  // arming a placement tool. Shortcut numbers remain compatible with the guide/tutorial.
 
   /* ---------- PIXEL TOOL ICONS ----------
      Every tool used to label itself with a unicode symbol (◎ ▦ ═ ▧ ✥ ⌫ ⚇ ⇶ ⧉ ⇉). Those glyphs are
@@ -112,6 +93,7 @@ const Build = (() => {
   let root, cv, ctx, tip, hintEl, undoBtn, redoBtn, propCard, dpr = 1, ro = null;
   let raf = 0, frameRetryTimer = 0, running = false, frameFailures = 0;
   let cache = null, cacheGeo = null, bakeDirty = true, bakeDirtyRects = null, bakeDirtyRectsGlobal = false, bakeVisibleOnly = false, valPlan = null, valLive = null;   // valPlan = live RoutingPlan (cost-safety ghosts); valLive = energized-belt tile set
+  const sceneRenderer = typeof WorldRenderer !== 'undefined' ? WorldRenderer.create() : null;
   let planDirty = true;   // routing-plan cache flag: set by EDITS (station.onChange / open), never by pure pans — see rebake()
   const flashes = [];   // {rects, t0, bad} place/delete confirmations
   // short human labels for the routing-validation overlay (cost-safety: surfaced before any paid run)
@@ -141,7 +123,10 @@ const Build = (() => {
   const MINZ = 0.4, MAXZ = 6;
 
   // interaction state
-  let tool = 'select', kind = 'hab', style = 'cobalt', mat = 'plate', hallWidth = 2, propType = 'desk', propCat = 'workstation', propTier = 'functional';
+  let tool = 'select', kind = 'hab', style = 'cobalt', mat = 'plate', hallWidth = 2, propType = 'war_intelcab', propCat = 'all', propTier = 'functional';
+  let propSection = 'abilities', propAbility = '', equipmentAgentId = '';
+  let equipmentAccessKey = '', equipmentAccessView = null, equipmentAccessTicket = 0;
+  let hoverThumb = null;
   // SURFACE targets one surface at a time — the deck or the walls — so the palette stays two rows
   // instead of four. 'follow' wall colour = inherit the room's floor hue (the default).
   let paintTarget = 'floor', wallMat = 'plating', wallStyle = 'follow';
@@ -235,6 +220,8 @@ const Build = (() => {
        shut, and propQuery reopened the palette silently filtered by a search the Commander can't see. */
     for (const k in layerFailed) delete layerFailed[k];
     propCardKey = null; ordersSeenDone = null; propQuery = ''; lastTier = '';
+    propSection = 'abilities'; propAbility = ''; propCat = 'all'; propType = PropSprites.STARTER[0];
+    equipmentAgentId = ''; equipmentAccessKey = ''; equipmentAccessView = null; equipmentAccessTicket++;
     tool = 'select';   // SELECT is the default mode — a fresh REFIT session never opens with a placement tool armed
     ridePending = false; rideAgentId = null; ridePrevReach = null;   // the auto first-ride re-arms (and re-baselines its reach snapshot) from THIS session's compile, never a stale one
     // finish-the-line: fresh session state (the registry itself persists in localStorage) + one seam probe
@@ -263,6 +250,7 @@ const Build = (() => {
       bakeDirtyRects = bakeDirtyRects && rects ? bakeDirtyRects.concat(rects) : (rects || bakeDirtyRects);
       if (bakeDirtyRectsGlobal) bakeDirtyRects = null;
       updateUndoRedo();
+      if (tool === 'prop') renderEquipmentInfo();
     });
     bakeDirty = true; bakeDirtyRects = null; bakeDirtyRectsGlobal = false; planDirty = true;
     frameFailures = 0;
@@ -334,12 +322,12 @@ const Build = (() => {
           <button class="bb sm" id="refit-redo" title="redo (Ctrl+Shift+Z)">↷ REDO</button>
         </span>
         <button class="bb sm" id="refit-fit" title="frame the station">⊹ FIT</button>
-        <button class="bb sm" id="refit-test" title="send test work down your belts — watch it sort to the bays (no bot needed)">▸ TEST</button>
+        <button class="bb sm" id="refit-test" title="Preview routing with an animated example. This does not run an AI task; use Run a sample job on a configured line for real work.">▸ PREVIEW</button>
         <button class="bb sm" id="refit-help" title="how to build">? HELP</button>
-        <button class="bb sm refit-primary" id="refit-done" title="finish + save (Esc)">✓ DONE</button>
+        <button class="bb sm refit-primary" id="refit-done" title="finish + save (Esc)">DONE</button>
       </div>
-      <div class="refit-dock" role="toolbar" aria-label="Refit mode controls">
-        <div class="refit-dock-head"><span class="refit-dock-head-t">BUILD KIT</span></div>
+      <div class="refit-dock" role="region" aria-label="Construction kit">
+        <div class="refit-dock-head"><span class="refit-dock-head-t">BUILD KIT</span><span class="refit-dock-caption">SHAPE YOUR STATION</span><button class="bb sm" type="button" id="refit-kit-toggle" aria-expanded="true" aria-controls="refit-option-section">MINIMIZE ▴</button></div>
         <div class="refit-dock-section refit-mode-section">
           <div id="refit-tools"></div>
         </div>
@@ -386,20 +374,23 @@ const Build = (() => {
       return btn;
     };
     const byId = id => TOOLS.find(x => x.id === id);
-    // SELECT rides its own full-width row above the groups — the cursor, not a fifth kind of build
-    const selRow = document.createElement('div'); selRow.className = 'refit-tools refit-tools-sel';
-    selRow.appendChild(toolBtn(byId('select')));
-    tools.appendChild(selRow);
-    TOOL_GROUPS.forEach(g => {
-      const wrap = document.createElement('div'); wrap.className = 'refit-toolgroup';
-      const lab = document.createElement('div'); lab.className = 'refit-group-label';
-      lab.innerHTML = '<span class="refit-group-n">' + esc(g.label) + '</span><span class="refit-group-why">' + esc(g.why) + '</span>';
-      wrap.appendChild(lab);
-      const grid = document.createElement('div'); grid.className = 'refit-tools';
-      g.tools.forEach(id => { const t = byId(id); if (t) grid.appendChild(toolBtn(t)); });
-      wrap.appendChild(grid);
-      tools.appendChild(wrap);
-    });
+    // Every tool stays visible. Collapsed details hid the entire prop tool on
+    // narrow screens when the old responsive layout removed their summaries.
+    tools.setAttribute('role', 'toolbar'); tools.setAttribute('aria-label', 'Build tools');
+    for (const [name,ids] of [['BUILD & DECORATE',['room','hall','prop','paint']],['EDIT YOUR STATION',['select','move','dupe','reclaim']],['WORKFLOWS',['belt','line']]]) {
+      const group = document.createElement('section'); group.className = 'refit-toolset'; group.setAttribute('aria-label',name);
+      const caption = document.createElement('div'); caption.className = 'refit-toolset-label'; caption.textContent = name;
+      const buttons = document.createElement('div'); buttons.className = 'refit-toolset-buttons' + (ids[0] === 'select' ? ' is-edit' : '');
+      ids.forEach(id => buttons.appendChild(toolBtn(byId(id)))); group.append(caption,buttons); tools.appendChild(group);
+    }
+    // Dismissing the category picker on the deck must not stamp a prop underneath it.
+    root.addEventListener('pointerdown', ev => {
+      const menu = root.querySelector('.refit-category-menu[open]');
+      if (!menu || menu.contains(ev.target)) return;
+      menu.open = false;
+      if (ev.target === cv) { ev.preventDefault(); ev.stopPropagation(); }
+    }, true);
+    root.querySelector('#refit-kit-toggle').onclick = () => toggleKit();
     renderPalette();
     repaintIcons();
     setCursor();
@@ -469,15 +460,35 @@ const Build = (() => {
   // It is on screen, so it has to be typeable — the prop -> capability map lives in the world model.
   const grantLabelOf = c => ((typeof WorldModel !== 'undefined' && WorldModel.grantLabelForProp)
     ? (WorldModel.grantLabelForProp(c && c.id) || '') : '');
+  const capOf = c => WorldModel.capForProp(c.id);
+  const sectionOf = c => EquipmentHelp.kind(c, capOf(c));
+  const SECTION_NAMES = { abilities: 'ABILITIES', equipment: 'WORKSTATIONS & WORKFLOWS', decoration: 'DECORATION' };
+  const starterProps = () => PropSprites.STARTER.map(id => PropSprites.spec(id)).filter(Boolean);
+  const abilityName = cap => EquipmentHelp.ABILITY_NAMES[cap] || String(cap || '').toUpperCase();
+  const chooseLibrarySection = section => {
+    propSection = section; propAbility = ''; propCat = 'all'; propQuery = '';
+    const first = section === 'abilities' ? starterProps()[0] : catalog().find(c => sectionOf(c) === section);
+    if (first) propType = first.id;
+    hidePropCard(); renderPalette(); setHint(); sfx('click');
+  };
+  function chooseAbility(cap, designs = false) {
+    const c = starterProps().find(p => capOf(p) === cap) || catalog().find(p => capOf(p) === cap);
+    if (!c) return;
+    propSection = 'abilities'; propAbility = designs ? cap : ''; propCat = 'all'; propQuery = '';
+    // Keep a selected alternate design when opening its family.
+    if (WorldModel.capForProp(propType) !== cap) propType = c.id;
+    hidePropCard(); renderPalette(); setHint(); sfx('click');
+  }
   // one options bundle so the palette and the unit test match on IDENTICAL surfaces
-  const searchOpts = () => ({ catLabel: catLabelOf, tierLabel: tierLabelOf, extra: grantLabelOf });
+  const searchOpts = () => ({ catLabel: catLabelOf, tierLabel: tierLabelOf, extra: c => [grantLabelOf(c), EquipmentHelp.label(c, capOf(c)), EquipmentHelp.PURPOSE[capOf(c)] || ''].join(' ') });
   const isSearching = () => (typeof PropSearch !== 'undefined') && PropSearch.active(propQuery);
 
   // what the gallery is showing right now: matches across the WHOLE catalog, or the chosen tab
   function propsForGrid() {
     if (isSearching()) return PropSearch.matchProps(catalog(), propQuery, searchOpts());
-    const CATS = (typeof PropSprites !== 'undefined') ? PropSprites.CATS : {};
-    return CATS[propCat] || [];
+    if (propSection === 'abilities') return propAbility
+      ? catalog().filter(c => capOf(c) === propAbility) : starterProps();
+    return catalog().filter(c => sectionOf(c) === propSection && (propCat === 'all' || c.cat === propCat));
   }
 
   /* Leave search mode and go back to browsing. This must rebuild the WHOLE palette, not just the
@@ -506,7 +517,7 @@ const Build = (() => {
     inp.autocomplete = 'off';
     inp.setAttribute('aria-label', 'Search props');
     // the count is READ from the catalog — a hardcoded "120" becomes a lie the first time a prop lands
-    inp.placeholder = 'SEARCH ' + catalog().length + ' PROPS — NAME OR CATEGORY';
+    inp.placeholder = 'Search ' + catalog().length + ' props · name, category or ability';
     inp.oninput = () => { propQuery = inp.value; renderPropGrid(); };
     inp.onkeydown = (ev) => {
       if (ev.key !== 'Escape') return;
@@ -526,36 +537,190 @@ const Build = (() => {
     return row;
   }
 
-  /* rebuild ONLY the gallery (and the rows a search hides). Runs on every keystroke and every tile
+  /* rebuild ONLY the gallery and category selection. Runs on every keystroke and every tile
      pick, so it must never re-create the <input> above it. */
   function renderPropGrid() {
     const host = root && root.querySelector('#refit-propgrid-host');
     if (!host) return;
     const on = isSearching();
-    // .refit-tiers/.refit-propcats declare `display:flex`, which beats the UA's [hidden] rule — so the
-    // visibility toggle has to be an inline display, not the hidden attribute.
-    const tiers = root.querySelector('.refit-tiers'), cats = root.querySelector('.refit-propcats');
-    if (tiers) tiers.style.display = on ? 'none' : '';
-    if (cats) cats.style.display = on ? 'none' : '';
+    const workspace = root.querySelector('.refit-propworkspace');
+    workspace.dataset.section = propSection; workspace.classList.toggle('is-searching', on);
+    const overview = workspace.querySelector('.refit-ability-overview');
+    if (overview) overview.hidden = propSection !== 'abilities' || on;
+    workspace.classList.toggle('is-core-view', !on && propSection === 'abilities' && !propAbility);
+    root.querySelectorAll('[data-prop-section]').forEach(b => {
+      const active = !on && b.dataset.propSection === propSection;
+      b.classList.toggle('active', active); b.setAttribute('aria-pressed', String(active));
+    });
+    root.querySelectorAll('.refit-propcat').forEach(b => {
+      const active = !on && b.dataset.cat === propCat;
+      b.classList.toggle('active', active); b.setAttribute('aria-pressed', String(active));
+    });
     const clr = root.querySelector('.refit-searchclear');
+    const menu = root.querySelector('.refit-category-menu');
+    if (menu) {
+      if (on) menu.open = false;
+      menu.hidden = on || propSection === 'abilities';
+      menu.querySelector('.refit-category-current').textContent = propCat === 'all' ? 'ALL ' + SECTION_NAMES[propSection] : catLabelOf(propCat);
+    }
     if (clr) clr.style.display = propQuery ? '' : 'none';
 
     propThumbs.length = 0;   // the gallery is the only thumb source; free the outgoing tiles' canvases
     host.innerHTML = '';
     const list = propsForGrid();
-    if (on) {
+    if (!on && propSection === 'abilities') {
+      const intro = document.createElement('div'); intro.className = 'refit-ability-intro';
+      intro.innerHTML = '<b>' + esc(propAbility ? abilityName(propAbility) + ' · CHOOSE A DESIGN' : 'FIVE CORE ABILITIES') + '</b><span>' +
+        esc(propAbility ? 'Same ability, different appearance. One matching prop is enough in the relevant room.' : 'Real tools. Pick one design per ability you need.') + '</span>';
+      if (propAbility) {
+        const back = document.createElement('button'); back.type = 'button'; back.className = 'bb sm refit-ability-back'; back.textContent = '← ALL ABILITIES';
+        back.onclick = () => { propAbility = ''; renderPropGrid(); }; intro.prepend(back);
+      }
+      host.appendChild(intro);
+    }
+    {
       const note = document.createElement('div');
       note.className = 'refit-searchnote' + (list.length ? '' : ' none');
+      note.setAttribute('role', 'status');
       note.textContent = list.length
-        ? list.length + (list.length === 1 ? ' MATCH' : ' MATCHES') + ' · ALL TIERS'
-        : 'NO PROP MATCHES "' + propQuery.trim().toUpperCase() + '"';
+        ? (on ? 'SEARCH · ALL CATEGORIES' : propSection === 'abilities' ? 'ABILITY EQUIPMENT' : propCat === 'all' ? SECTION_NAMES[propSection] : catLabelOf(propCat)) + ' / ' + list.length + ' ITEMS'
+        : on ? 'No props match “' + propQuery.trim() + '”. Try a name or ability, such as web, files or desk.' : 'No equipment in this category.';
+      if (!on && propSection === 'abilities') note.hidden = true;
       host.appendChild(note);
+      if (!list.length && on) {
+        const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'bb sm'; reset.textContent = 'CLEAR SEARCH';
+        reset.onclick = () => clearSearch(); host.appendChild(reset);
+      }
     }
     const grid = document.createElement('div'); grid.className = 'refit-propgrid';
     grid.setAttribute('aria-label', 'Props');
-    list.forEach(c => grid.appendChild(propTile(c)));
+    const coreView = !on && propSection === 'abilities' && !propAbility;
+    if (coreView) grid.classList.add('refit-core-grid');
+    list.forEach(c => grid.appendChild(propTile(c, coreView)));
     host.appendChild(grid);
-    try { paintThumbs(performance.now()); } catch (e) {}   // first frame now, so the gallery isn't blank for a beat
+    if (coreView) {
+      const coreCaps = new Set(list.map(capOf));
+      const extras = catalog().filter(c => sectionOf(c) === 'abilities' && !coreCaps.has(capOf(c)));
+      if (extras.length) {
+        const label = document.createElement('div'); label.className = 'refit-ability-intro';
+        label.innerHTML = '<b>CONNECTED SERVICES</b><span>Optional equipment for connected accounts and tools.</span>'; host.appendChild(label);
+        const extraGrid = document.createElement('div'); extraGrid.className = 'refit-propgrid';
+        extras.forEach(c => extraGrid.appendChild(propTile(c))); host.appendChild(extraGrid);
+      }
+    }
+    renderPropPreview();
+    renderEquipmentInfo();
+    try { paintThumbs(performance.now(), true); } catch (e) {}   // paint each card once; animate only the selected/hovered item
+  }
+
+  // The selected prop's existing palette explains purpose, scope and effective access.
+  function libraryAgent() {
+    const agents = (opts && opts.agents && opts.agents()) || [];
+    const h = typeof StationUI !== 'undefined' && StationUI.h;
+    const chosen = h && h.present && h.present[h.sel];
+    if (!agents.some(a => a.id === equipmentAgentId)) equipmentAgentId = (chosen && chosen.id) || (agents[0] && agents[0].id) || 'agent';
+    return { agents, id: equipmentAgentId };
+  }
+  function renderAbilityOverview() {
+    const wrap = document.createElement('section'); wrap.className = 'refit-ability-overview'; wrap.setAttribute('aria-label', 'Core tool access');
+    const { agents, id } = libraryAgent();
+    wrap.innerHTML = '<div class="refit-access-head"><label>TOOL ACCESS FOR <select class="refit-input" aria-label="Inspect equipment for agent">' +
+      agents.map(a => '<option value="' + esc(a.id) + '"' + (a.id === id ? ' selected' : '') + '>' + esc(a.name || a.id) + '</option>').join('') +
+      '</select></label><button class="bb xs" type="button" aria-label="Refresh tool access" data-refresh-access>↻</button></div><div class="refit-core-access"></div>';
+    const chips = wrap.querySelector('.refit-core-access');
+    starterProps().forEach(c => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'bb refit-access-chip'; b.dataset.accessCap = capOf(c);
+      b.innerHTML = '<b>' + esc(grantLabelOf(c)) + '</b><span>CHECKING</span>';
+      b.onclick = () => chooseAbility(capOf(c)); chips.appendChild(b);
+    });
+    wrap.querySelector('select').onchange = ev => { equipmentAgentId = ev.target.value; renderEquipmentInfo(); };
+    wrap.querySelector('[data-refresh-access]').onclick = () => { equipmentAccessKey = ''; renderEquipmentInfo(); };
+    return wrap;
+  }
+  function refreshLibraryAccess(facts, aid) {
+    const key = [aid, geoVer, facts.placed.join(',')].join('|');
+    const paint = (view, pending = false) => {
+      if (!root || !root.querySelector('.refit-ability-overview')) return;
+      root.querySelectorAll('[data-access-cap]').forEach(b => {
+        const a = EquipmentHelp.access(b.dataset.accessCap, view);
+        b.dataset.state = pending ? 'pending' : a.state;
+        b.querySelector('span').textContent = pending ? 'CHECKING' : a.label;
+        b.setAttribute('aria-label', abilityName(b.dataset.accessCap) + ' · ' + (pending ? 'Checking access' : a.label));
+      });
+      root.querySelectorAll('[data-core-ability]').forEach(b => {
+        const a = EquipmentHelp.access(b.dataset.coreAbility, view);
+        b.dataset.state = pending ? 'pending' : a.state;
+        b.querySelector('.refit-core-status').textContent = pending ? 'CHECKING ACCESS' : a.label;
+      });
+      const status = root.querySelector('.refit-propinspector .equipment-status');
+      if (status) status.textContent = pending ? 'Checking current access…' : EquipmentHelp.status(facts, view);
+    };
+    if (key === equipmentAccessKey) { paint(equipmentAccessView, equipmentAccessView === undefined); return; }
+    equipmentAccessKey = key; equipmentAccessView = undefined;
+    const ticket = ++equipmentAccessTicket; paint(null, true);
+    Harness.api.get('/api/toolsets?agent=' + encodeURIComponent(aid) + '&placed=' + encodeURIComponent(facts.placed.join(',')))
+      .catch(() => null).then(view => {
+        if (ticket !== equipmentAccessTicket || !root || !root.isConnected) return;
+        equipmentAccessView = view;
+        // Selection may have changed while this request was in flight; re-read its facts.
+        renderEquipmentInfo();
+      });
+  }
+  function renderLibraryInfo(spec) {
+    const inspector = root.querySelector('.refit-propinspector');
+    if (!inspector) return;
+    let box = inspector.querySelector('.refit-equipment-info');
+    if (!box) {
+      box = document.createElement('div'); box.className = 'refit-equipment-info';
+      box.id = 'refit-prop-details';
+      const preview = inspector.querySelector('#refit-selected-prop');
+      preview.insertBefore(box, preview.querySelector('.refit-placement-note'));
+    }
+    const { id } = libraryAgent(), facts = EquipmentHelp.inspect(station, id, spec.id), category = sectionOf(spec);
+    const key = [spec.id, id, geoVer].join('|');
+    if (box.dataset.infoKey !== key) {
+      box.dataset.infoKey = key;
+      const purpose = facts.purpose || PALETTE_PURPOSE[spec.id] || spec.desc || (category === 'decoration' ? 'Changes the look of your station. Adds no agent tools.' : 'Equipment for arranging work in the station.');
+      box.innerHTML = '<p class="refit-purpose">' + esc(purpose) + '</p>' +
+        (facts.cap ? '<div class="equipment-status" role="status">Checking current access…</div><div class="refit-equipment-scope">' +
+        esc('Equipment sharing: ' + facts.scope + '.') + '</div>' :
+        category === 'decoration' ? '' : '<div class="refit-equipment-scope">Organizes the station; does not add an ability.</div>') +
+        '<div class="refit-equipment-detail">' + esc(facts.cap ? facts.duplicates : spec.desc || '') +
+        (facts.cap ? '<p>Without a workflow bay, an agent draws on station equipment. With a bay, it uses equipment in its desk room (or bay room if there is no desk). Each workflow agent needs its own desk.</p><p>Connected accounts and providers are configured in Abilities.</p>' : '') + '</div>';
+    }
+    refreshLibraryAccess(facts, id);
+  }
+  function renderEquipmentInfo(selectedType, placedProp) {
+    const pal = root && root.querySelector('#refit-palette');
+    if (!pal || typeof EquipmentHelp === 'undefined') return;
+    const spec = catalog().find(c => c.id === (selectedType || propType));
+    if (!spec) return;
+    if (typeof Tutorial !== 'undefined' && Tutorial.onEquipmentInspect) Tutorial.onEquipmentInspect();
+    if (tool === 'prop' && pal.querySelector('.refit-ability-overview')) return renderLibraryInfo(spec);
+    let box = pal.querySelector('.refit-equipment-info');
+    if (!box) { box = document.createElement('div'); box.className = 'refit-equipment-info'; (pal.querySelector('.refit-propinspector') || pal).appendChild(box); }
+    const agents = (opts && opts.agents && opts.agents()) || [];
+    const h = typeof StationUI !== 'undefined' && StationUI.h;
+    const chosen = h && h.present && h.present[h.sel];
+    const aid = box.querySelector('select')?.value || (chosen && chosen.id) || (agents[0] && agents[0].id) || 'agent';
+    const infoKey = [spec.id, aid, geoVer, placedProp && placedProp.id].join('|');
+    if (box.dataset.infoKey === infoKey) return;
+    box.dataset.infoKey = infoKey;
+    const facts = EquipmentHelp.inspect(station, aid, spec.id);
+    const sharingOpen = !!box.querySelector('details[open]');
+    const propRoom = placedProp && station.roomById(station.roomAt(placedProp.x, placedProp.y));
+    box.innerHTML = '<p class="refit-purpose">' + esc(facts.purpose || spec.desc || 'Station decoration.') + '</p>'
+      + (facts.cap ? (agents.length > 1 ? '<label> For <select class="refit-input" aria-label="Inspect equipment for agent">' + agents.map(a => '<option value="' + esc(a.id) + '"' + (a.id === aid ? ' selected' : '') + '>' + esc(a.name || a.id) + '</option>').join('') + '</select></label>' : '')
+      + '<div class="equipment-status" role="status">Checking current access…</div>'
+      + '<div>Equipment scope: ' + esc(facts.scope) + (propRoom ? ' · This copy: ' + esc(propRoom.name || propRoom.id) : '') + '</div>'
+      + '<details' + (sharingOpen ? ' open' : '') + '><summary>Sharing, rooms & extra copies</summary><p>' + facts.count + ' matching prop' + (facts.count === 1 ? '' : 's') + '. ' + esc(facts.duplicates) + '</p>Without a workflow bay, the lead draws on equipment across the station. With a bay, an agent uses its desk room (or the bay room if it has no desk). Agents in that room share equipment; each needs its own desk. Moving or removing the last matching prop changes that room’s equipment; access settings may still supply its tools. Connect external services in Abilities.</details>' : '<div>' + esc(facts.duplicates) + '</div>');
+    const select = box.querySelector('select');
+    if (select) select.onchange = () => renderEquipmentInfo(spec.id, placedProp);
+    const status = box.querySelector('.equipment-status');
+    if (!status) return;
+    Harness.api.get('/api/toolsets?agent=' + encodeURIComponent(aid) + '&placed=' + encodeURIComponent(facts.placed.join(',')))
+      .then(view => { if (status.isConnected) status.textContent = EquipmentHelp.status(facts, view); })
+      .catch(() => { if (status.isConnected) status.textContent = EquipmentHelp.status(facts, null); });
   }
 
   function renderPalette() {
@@ -565,14 +730,22 @@ const Build = (() => {
     const section = root.querySelector('#refit-option-section');
     const label = root.querySelector('#refit-palette-label');
     let paletteLabel = '';
+    root.dataset.tool = tool;
     pal.innerHTML = '';
     propThumbs.length = 0;   // drop any preview tiles from a prior render (they're rebuilt below for the prop tool)
     if (tool === 'select') {
       paletteLabel = 'INSPECT';
       const note = document.createElement('div');
       note.className = 'refit-selectnote';
-      note.textContent = 'Click a machine to open it · click a belt to see where its lane goes. Keys 1–9 arm a build tool; ESC / right-click always returns here.';
+      note.innerHTML = '<span class="ui-overline">SELECT</span><b>Make it your space</b><span>Click a room or object to edit it. To add something, choose a tool above or start here.</span>';
       pal.appendChild(note);
+      const starts = document.createElement('div'); starts.className = 'refit-starts';
+      for (const [id,name,why] of [['prop','Browse props','Equipment, furniture and decoration'],['room','Add a room','Choose a room type, then click or drag']]) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'refit-start'; b.dataset.startTool = id;
+        b.innerHTML = '<span class="refit-start-key">' + esc(TOOLS.find(t => t.id === id).key) + '</span><b>' + esc(name) + '</b><span>' + esc(why) + '</span><em>CHOOSE →</em>';
+        b.onclick = () => selectTool(id); starts.appendChild(b);
+      }
+      pal.appendChild(starts);
     } else if (tool === 'room') {
       /* ROOM TYPE was the last palette in REFIT still made of bare text chips, next to a prop
          gallery of live animated previews and a material grid painted by the real bake. A room
@@ -612,54 +785,61 @@ const Build = (() => {
         b.type = 'button';
         b.className = 'bb sm refit-kind' + (w === hallWidth ? ' active' : '');
         b.setAttribute('aria-pressed', w === hallWidth ? 'true' : 'false');
-        b.textContent = 'W' + w;
+        b.textContent = w + (w === 1 ? ' tile' : ' tiles');
         b.onclick = () => { hallWidth = w; renderPalette(); sfx('click'); };
         pal.appendChild(b);
       });
     } else if (tool === 'prop') {
       paletteLabel = 'CATALOG';
       const CATS = (typeof PropSprites !== 'undefined') ? PropSprites.CATS : {};
-      if (TIER_ORDER.indexOf(propTier) < 0) propTier = 'functional';
-      let cats = catsForTier(propTier);
-      if (cats.indexOf(propCat) < 0) { propCat = cats[0]; if (CATS[propCat] && CATS[propCat][0]) propType = CATS[propCat][0].id; }
-      // row -1 — SEARCH. Two tiers × ~11 category tabs is a fine map once you know which drawer a thing
-      // lives in and useless when you don't; with 120 props the taxonomy became the slow path. A query
-      // here goes FLAT across the whole catalog (both tiers, every category) and hides the browse rows
-      // while it's active, so what's on screen never disagrees with the lit tab.
-      pal.appendChild(propSearchRow());
-      // row 0 — the TIER toggle: a clear, hard split between props that DO something and props that are just looks
-      const tierRow = document.createElement('div'); tierRow.className = 'refit-tiers';
-      tierRow.setAttribute('aria-label', 'Prop tiers');
-      TIER_ORDER.forEach(t => {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'bb sm refit-tier refit-tier-' + t + (t === propTier ? ' active' : '');
-        b.setAttribute('aria-pressed', t === propTier ? 'true' : 'false');
-        b.textContent = tierLabelOf(t);
-        b.onclick = () => { propQuery = ''; propTier = t; const cs = catsForTier(t); propCat = cs[0]; if (CATS[propCat] && CATS[propCat][0]) propType = CATS[propCat][0].id; hidePropCard(); renderPalette(); setHint(); sfx('click'); };
-        tierRow.appendChild(b);
-      });
-      pal.appendChild(tierRow);
-      // row 1 — category tabs WITHIN the chosen tier (clean, specific names — WORKSTATIONS · WORKFLOW · …)
-      const catRow = document.createElement('div'); catRow.className = 'refit-propcats';
+      const workspace = document.createElement('div'); workspace.className = 'refit-propworkspace';
+      const browser = document.createElement('div'); browser.className = 'refit-propbrowser';
+      const search = propSearchRow();
+      const sections = document.createElement('nav'); sections.className = 'refit-prop-sections'; sections.setAttribute('aria-label', 'Prop purpose');
+      for (const id of Object.keys(SECTION_NAMES)) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'bb refit-prop-section'; b.dataset.propSection = id;
+        b.textContent = SECTION_NAMES[id]; b.onclick = () => chooseLibrarySection(id); sections.appendChild(b);
+      }
+      const details = document.createElement('button'); details.type = 'button'; details.className = 'bb sm refit-details-toggle'; details.textContent = 'DETAILS ▾';
+      details.setAttribute('aria-expanded', 'false');
+      details.setAttribute('aria-controls', 'refit-prop-details');
+      details.onclick = () => {
+        const expanded = workspace.classList.toggle('show-details');
+        details.setAttribute('aria-expanded', String(expanded));
+        details.textContent = expanded ? 'LESS ▴' : 'DETAILS ▾';
+        details.scrollIntoView({ block: 'nearest' });
+      };
+      browser.append(sections, renderAbilityOverview(), search);
+      const shelves = document.createElement('div'); shelves.className = 'refit-shelves';
+      const categoryMenu = document.createElement('details'); categoryMenu.className = 'refit-category-menu';
+      const categoryTrigger = document.createElement('summary'); categoryTrigger.id = 'refit-category-trigger';
+      categoryTrigger.innerHTML = '<span class="refit-category-label">CATEGORY</span><b class="refit-category-current"></b><span class="refit-category-arrow" aria-hidden="true">▾</span>';
+      categoryMenu.appendChild(categoryTrigger);
+      const catRow = document.createElement('nav'); catRow.className = 'refit-propcats';
       catRow.setAttribute('aria-label', 'Prop categories');
-      cats.forEach(g => {
+      const sectionProps = catalog().filter(c => sectionOf(c) === propSection);
+      ['all', ...new Set(sectionProps.map(c => c.cat))].forEach(g => {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'bb sm refit-propcat' + (g === propCat ? ' active' : '');
         b.dataset.cat = g;   // lets the tutorial light the exact category tab a step needs
         b.setAttribute('aria-pressed', g === propCat ? 'true' : 'false');
-        b.textContent = catLabelOf(g);
-        b.onclick = () => { propQuery = ''; propCat = g; if (CATS[g] && CATS[g][0]) propType = CATS[g][0].id; hidePropCard(); renderPalette(); setHint(); sfx('click'); };
+        const count = g === 'all' ? sectionProps.length : sectionProps.filter(c => c.cat === g).length;
+        const name = g === 'all' ? 'ALL ' + SECTION_NAMES[propSection] : catLabelOf(g);
+        b.setAttribute('aria-label', name + ' · ' + count + ' items');
+        b.innerHTML = '<span>' + esc(name) + '</span><small>' + count + '</small>';
+        b.onclick = () => { propQuery = ''; propCat = g; hidePropCard(); renderPalette(); setHint(); sfx('click'); };
         catRow.appendChild(b);
       });
-      pal.appendChild(catRow);
-      // row 2 — a scrollable gallery of LIVE previews: each tile draws the real animated sprite, not just its name.
-      // It lives in its own HOST because every keystroke rebuilds the gallery and NOTHING else: re-running
-      // renderPalette() here would replace the <input> mid-word and the field would lose focus (and the caret)
-      // after a single character — the classic way a search box ships broken.
+      categoryMenu.appendChild(catRow); shelves.appendChild(categoryMenu);
       const gridHost = document.createElement('div'); gridHost.id = 'refit-propgrid-host';
-      pal.appendChild(gridHost);
+      shelves.appendChild(gridHost); browser.appendChild(shelves); workspace.appendChild(browser);
+      const inspector = document.createElement('aside'); inspector.className = 'refit-propinspector'; inspector.setAttribute('aria-label', 'Selected equipment details');
+      const preview = document.createElement('section'); preview.id = 'refit-selected-prop';
+      preview.className = 'refit-selected-prop'; preview.setAttribute('aria-label', 'Selected prop');
+      inspector.appendChild(preview);
+      const more = document.createElement('div'); more.className = 'refit-prop-more'; more.appendChild(details); inspector.appendChild(more);
+      workspace.appendChild(inspector); pal.appendChild(workspace);
       renderPropGrid();
     } else if (tool === 'paint') {
       /* SURFACE — TWO AXES, TWO SECTIONS: the MATERIAL (what the surface is made of) and the HUE
@@ -806,7 +986,7 @@ const Build = (() => {
       paletteLabel = 'THE LINE LIBRARY';
       const intro = document.createElement('div');
       intro.className = 'refit-lineintro';
-      intro.textContent = LINE_SENTENCE + ' Stamp a working line, then make it yours.';
+      intro.textContent = LINE_SENTENCE + ' Choose a workflow layout, then make it yours.';
       pal.appendChild(intro);
       const grid = document.createElement('div'); grid.className = 'refit-linegrid';
       grid.setAttribute('aria-label', 'Line library');
@@ -866,7 +1046,7 @@ const Build = (() => {
       pal.appendChild(grid);
       const note = document.createElement('div');
       note.className = 'refit-linenote';
-      note.textContent = 'BAYS STAMP EMPTY — CLICK EACH ONE TO ASSIGN AN AGENT · ONE UNDO REMOVES THE WHOLE LINE';
+      note.textContent = 'STEPS NEED AN AGENT — CLICK EACH STEP TO ASSIGN AN AGENT · ONE UNDO REMOVES THE WHOLE LINE';
       pal.appendChild(note);
     }
     /* NAME THE ARMED TOOL IN THE OPTIONS HEADER. The two zones of this dock — the tool you picked
@@ -888,10 +1068,19 @@ const Build = (() => {
     if (!root || !document.body) return;
     const dock = root.querySelector('.refit-dock');
     if (!dock) return;
-    const r = dock.getBoundingClientRect();
-    const gap = 12;
-    const clearance = Math.ceil(r.height + Math.max(0, window.innerHeight - r.bottom) + gap);
-    document.body.style.setProperty('--refit-dock-clearance', Math.max(58, clearance) + 'px');
+    const top = root.querySelector('.refit-top');
+    if (top) dock.style.top = (top.offsetHeight + 10) + 'px';
+    // This console is always on the left; it does not occupy the bottom action rail.
+    document.body.style.setProperty('--refit-dock-clearance', '58px');
+  }
+
+  function toggleKit(collapsed) {
+    const dock = root && root.querySelector('.refit-dock'); if (!dock) return;
+    const hide = collapsed == null ? !dock.classList.contains('is-collapsed') : collapsed;
+    dock.classList.toggle('is-collapsed', hide);
+    const b = root.querySelector('#refit-kit-toggle');
+    b.textContent = hide ? 'OPEN KIT ▾' : 'MINIMIZE ▴'; b.setAttribute('aria-expanded', String(!hide));
+    bumpUi(); updateSafetyClearance();
   }
 
   /* ---------- visual prop palette: a scrollable gallery of LIVE animated previews ----------
@@ -909,18 +1098,22 @@ const Build = (() => {
     outbox: 'the exit — every finished result ships here; click it for the logbook'
   };
   const THUMB_PAD = 7;   // native-px halo so art that overflows the footprint (monitors, masts, shadows) isn't clipped
-  function propTile(c) {
+  function propTile(c, core = false) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'refit-proptile' + (c.tier === 'functional' ? ' fn' : '') + (c.id === propType ? ' active' : '');
+    const selected = c.id === propType || (core && capOf(c) === WorldModel.capForProp(propType));
+    b.className = 'refit-proptile' + (sectionOf(c) !== 'decoration' ? ' fn' : '') + (core ? ' refit-core-card' : '') + (selected ? ' active' : '');
     b.dataset.prop = c.id;   // lets the tutorial light a specific gear tile by id
-    b.setAttribute('aria-pressed', c.id === propType ? 'true' : 'false');
+    b.dataset.purpose = sectionOf(c);
+    if (core) b.dataset.coreAbility = capOf(c);
+    b.setAttribute('aria-pressed', selected ? 'true' : 'false');
     const grant = (typeof WorldModel !== 'undefined' && WorldModel.grantLabelForProp) ? WorldModel.grantLabelForProp(c.id) : null;
-    /* the station tooltip (tooltip.js adopts this title) is the FIRST thing a hover says, and "JOINER · 1×1"
-       told a Commander nothing a MERGER did not — so every WORKFLOW machine carries a one-line purpose here
-       (PALETTE_PURPOSE), distinguishable before it is placed. The rich card below stays the long form. */
+    // A brief shared tooltip identifies the item without selecting it or opening a card.
+    // Full details remain in the inspector; no native browser title bubble.
     const purpose = PALETTE_PURPOSE[c.id] || '';
-    b.title = c.label + ' · ' + c.w + '×' + c.h + (grant ? ' · grants ' + grant : '') + (purpose ? ' — ' + purpose : '');
+    const glance = purpose || EquipmentHelp.PURPOSE[capOf(c)] || '';
+    b.setAttribute('data-tip', c.label + ' · ' + EquipmentHelp.label(c, capOf(c)) + (glance ? '\n' + glance : ''));
+    b.setAttribute('aria-description', c.label + ' · ' + c.w + '×' + c.h + (grant ? ' · grants ' + grant : '') + (purpose ? ' — ' + purpose : ''));
     // Grid-only re-render: a full renderPalette() here would rebuild the search field and steal focus
     // out of it mid-search. But a pick out of a SEARCH result does change tab state — the prop almost
     // always lives under a different tier/category than the one still selected behind the results. Move
@@ -929,11 +1122,17 @@ const Build = (() => {
     // this, clearing dropped you back on WORKSTATIONS with nothing selected while a beanbag was armed.
     b.onclick = () => {
       propType = c.id;
-      if (isSearching()) { propTier = c.tier || 'cosmetic'; propCat = c.cat || propCat; }
-      renderPropGrid(); setHint(); sfx('click');
+      if (isSearching()) { propTier = c.tier || 'cosmetic'; propCat = 'all'; propSection = sectionOf(c); propAbility = ''; }
+      // Keep scroll and keyboard focus in the inventory; choosing an item must not
+      // recreate 144 canvases or throw the user back to the top of the shelf.
+      root.querySelectorAll('.refit-proptile').forEach(tile => {
+        const active = tile.dataset.prop === propType || (tile.dataset.coreAbility && tile.dataset.coreAbility === WorldModel.capForProp(propType));
+        tile.classList.toggle('active', active); tile.setAttribute('aria-pressed', String(active));
+      });
+      renderPropPreview(); renderEquipmentInfo(); setHint(); sfx('click');
     };
-    b.onmouseenter = (e) => showPropCard(c, null, e.clientX, e.clientY);   // "what does this do?" card
-    b.onmouseleave = hidePropCard;
+    b.onmouseenter = () => { hoverThumb = c.id; };
+    b.onmouseleave = () => { hoverThumb = null; };
 
     const DW = 76, DH = 50, SS = Math.max(2, Math.min(3, window.devicePixelRatio || 1));  // supersample so even wide props stay crisp
     const cvEl = document.createElement('canvas');
@@ -945,21 +1144,62 @@ const Build = (() => {
     const nativeW = c.w * tile + THUMB_PAD * 2, nativeH = c.h * tile + THUMB_PAD * 2;
     const off = document.createElement('canvas'); off.width = nativeW; off.height = nativeH;
 
-    const lbl = document.createElement('span'); lbl.className = 'refit-proptile-lbl'; lbl.textContent = c.label;
+    const lbl = document.createElement('span'); lbl.className = 'refit-proptile-lbl'; lbl.textContent = core ? 'ABILITY · ' + abilityName(capOf(c)) : c.label;
     b.appendChild(cvEl); b.appendChild(lbl);
-    if (grant) {   // capability prop — flag the POWER it grants so the gallery shows at a glance which props matter
-      const g = document.createElement('span'); g.className = 'refit-proptile-grant'; g.textContent = grant; b.appendChild(g);
-    }
+    const size = document.createElement('span'); size.className = 'refit-proptile-size'; size.textContent = core ? c.label : c.w + ' × ' + c.h + ' tiles'; b.appendChild(size);
+    const badge = document.createElement('span'); badge.className = 'refit-proptile-grant';
+    const icon = document.createElement('canvas'); icon.width = icon.height = 24; icon.className = 'refit-purpose-icon'; icon.setAttribute('aria-hidden', 'true');
+    badge.appendChild(icon); badge.append(document.createTextNode(core ? 'ABILITY' : EquipmentHelp.label(c, capOf(c)))); b.appendChild(badge);
+    paintIcon(icon, sectionOf(c) === 'abilities' ? 'prop' : sectionOf(c) === 'equipment' ? 'line' : 'paint', iconColour(root.querySelector('[data-tool="prop"]')));
+    if (core) { const status = document.createElement('span'); status.className = 'refit-core-status'; status.textContent = 'CHECKING ACCESS'; b.appendChild(status); }
     // (the old '○' walkable marker is gone — playtesting showed it read as an unexplained mystery badge;
     //  the hover card already states "N×M · walkable", which is where that fact is actually legible)
     propThumbs.push({ id: c.id, w: c.w, h: c.h, off, octx: off.getContext('2d'), dctx: cvEl.getContext('2d'),
                       nativeW, nativeH, bw: cvEl.width, bh: cvEl.height });
     return b;
   }
+  // One static, truthful preview per selection/orientation change. The gallery already owns
+  // animated thumbnails; this larger inspection well adds no frame-loop work.
+  function renderPropPreview() {
+    const host = root && root.querySelector('#refit-selected-prop');
+    const c = catalog().find(c => c.id === propType);
+    if (!host || !c) return;
+    const r = propFacing(c.id), m = propFlipOn(c.id), box = propBox(c.id, r), grant = grantLabelOf(c);
+    const previewKey = [c.id,r,m].join('|'); if (host.dataset.previewKey === previewKey) return; host.dataset.previewKey = previewKey;
+    host.innerHTML = '<div class="refit-preview-art"><canvas width="280" height="180" aria-label="' + esc(c.label) + ' preview"></canvas></div>' +
+      '<div class="refit-preview-info"><b>' + esc(c.label) + '</b>' +
+      '<span>' + box.w + ' × ' + box.h + ' tiles · ' + FACE_WORD[r] + (m ? ' · flipped' : '') + '</span>' +
+      '<span class="refit-preview-grant">' + esc(EquipmentHelp.label(c, capOf(c))) + '</span>' +
+      '<div class="refit-preview-actions">' +
+      (canTurn(c.id) ? '<button class="bb xs" type="button" data-preview-turn>↻ TURN · R</button>' : '') +
+      (canFlip(c.id) ? '<button class="bb xs" type="button" data-preview-flip>⇆ FLIP · M</button>' : '') + '</div></div>' +
+      '<span class="refit-placement-note">Click a clear spot on the station · Esc cancels</span>';
+    const alternatives = capOf(c) && capOf(c) !== 'computer' ? catalog().filter(p => capOf(p) === capOf(c)) : [];
+    const more = root.querySelector('.refit-prop-more');
+    more?.querySelector('.refit-designs')?.remove();
+    if (alternatives.length > 1) {
+      const designs = document.createElement('button'); designs.className = 'bb xs refit-designs'; designs.type = 'button';
+      designs.textContent = 'OTHER DESIGNS · ' + alternatives.length; designs.setAttribute('aria-label', 'Choose another design for ' + abilityName(capOf(c)));
+      designs.onclick = () => chooseAbility(capOf(c), true); if (more) more.prepend(designs);
+    }
+    const nativeW = box.w * 12 + 24, nativeH = box.h * 12 + 24;
+    const off = document.createElement('canvas'); off.width = nativeW; off.height = nativeH;
+    const o = off.getContext('2d'); o.translate(12, 12); o.imageSmoothingEnabled = false;
+    PropSprites.setCtx(o); PropSprites.setNow(0);
+    PropSprites.draw({ t: c.id, x: 0, y: 0, w: box.w, h: box.h, r, m }, false);
+    const cv = host.querySelector('canvas'), d = cv.getContext('2d'); d.imageSmoothingEnabled = false;
+    const scale = Math.min(cv.width / nativeW, cv.height / nativeH);
+    const w = Math.round(nativeW * scale), h = Math.round(nativeH * scale);
+    d.drawImage(off, Math.round((cv.width - w) / 2), Math.round((cv.height - h) / 2), w, h);
+    const turn = host.querySelector('[data-preview-turn]'), flip = host.querySelector('[data-preview-flip]');
+    if (turn) turn.onclick = () => { propRot = nextFace(c.id, propRot, 1) & 3; renderPropPreview(); renderEquipmentInfo(); setHint(); sfx('click'); };
+    if (flip) flip.onclick = () => { propMir = propMir ? 0 : 1; renderPropPreview(); renderEquipmentInfo(); setHint(); sfx('click'); };
+  }
   // draw every visible preview tile for time `now` (animated). Renders native → fit-blits with nearest-neighbour.
-  function paintThumbs(now) {
+  function paintThumbs(now, all) {
     if (typeof PropSprites === 'undefined' || !propThumbs.length) return;
     for (const th of propThumbs) {
+      if (!all && th.id !== propType && th.id !== hoverThumb) continue;
       const o = th.octx;
       o.setTransform(1, 0, 0, 1, 0, 0);
       o.clearRect(0, 0, th.nativeW, th.nativeH);
@@ -1333,7 +1573,7 @@ const Build = (() => {
       deselectTool({ silent: true });
       flashTip(ev, bp.label + ' STAMPED — now click each BAY to assign an agent', true);
       if (typeof StationUI !== 'undefined' && StationUI.pokeQuests) { try { StationUI.pokeQuests(); } catch (_) {} }
-      // belts just landed — the same first-touch coach a hand-laid run earns (points at ▸ TEST)
+      // belts just landed — the same first-touch coach a hand-laid run earns (points at ▸ PREVIEW)
       if (typeof Tutorial !== 'undefined' && Tutorial.onBeltPlaced) Tutorial.onBeltPlaced();
     } else {
       sfx('bad');
@@ -1356,7 +1596,8 @@ const Build = (() => {
       b.classList.toggle('active', active);
       b.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
-    renderPalette(); repaintIcons(); setHint(); setCursor();
+    toggleKit(false); renderPalette(); repaintIcons(); setHint(); setCursor();
+    renderFinCard();
     if (id === 'line') frameBlueprint();   // a footprint you cannot see whole cannot be aimed
     if (!(o && o.silent)) sfx('click');
   }
@@ -1387,6 +1628,7 @@ const Build = (() => {
   const CAMERA_KEYS = 'wheel zoom · space-drag pan · ESC deselect';
   function setHint(msg) {
     if (!hintEl) return;
+    hintEl.classList.toggle('is-feedback', !!msg);
     const t = TOOLS.find(x => x.id === tool);
     // SURFACE means three different gestures depending on which surface is targeted — say which
     let verb = (t && t.verb) || (t && t.hint) || '';
@@ -1396,6 +1638,8 @@ const Build = (() => {
     // the PROP hint carries the orientation the next stamp will use, and only advertises the keys
     // this prop actually honours — a prop with one authored facing never mentions R.
     if (tool === 'prop' && !msg) {
+      const spec = catalog().find(c => c.id === propType);
+      verb = (spec ? spec.label + ' · ' : '') + 'click a clear deck tile to place';
       const bits = [];
       if (canTurn(propType)) bits.push('R turn (facing ' + FACE_WORD[propFacing(propType)] + ')');
       if (canFlip(propType)) bits.push('M flip' + (propFlipOn(propType) ? ' ✓' : ''));
@@ -1494,7 +1738,21 @@ const Build = (() => {
          and the live world's NO AGENT nag did NOTHING while any other dock's card was open.
      So: a card REGISTERS its own close path on its element, and both callers route through it. Closing is
      always the card's own closing; opening always replaces whatever is up. */
-  function cardRegister(el, closeFn) { el._refitClose = closeFn; return el; }
+  function cardRegister(el, closeFn) {
+    el._refitClose = closeFn;
+    if (el.classList.contains('refit-workflow-editor')) {
+      el.addEventListener('keydown', e => {
+        if (e.key !== 'Tab') return;
+        const fields = [...el.querySelectorAll('button,input,textarea,select,summary,[tabindex]')]
+          .filter(n => !n.disabled && n.tabIndex >= 0 && n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden');
+        const first = fields[0], last = fields[fields.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+      });
+      requestAnimationFrame(() => { if (el.isConnected) el.querySelector('[data-workflow-close]')?.focus({ preventScroll: true }); });
+    }
+    return el;
+  }
   // topmost = last mounted (DOM order); these cards are appended, never re-ordered
   function cardTop() {
     if (!root) return null;
@@ -1534,28 +1792,28 @@ const Build = (() => {
        beats; each now leads with a PICTURE of the gesture (drawn in the station's own pixel language
        by guideStepArt) and carries one line of words under it. */
     g.innerHTML = `
-      <div class="refit-guide-card refit-guide-wide">
-        <h3>▮ BUILD YOUR STATION</h3>
-        <p class="refit-guide-lead">Your floor is a flowchart — work arrives at the <b>INBOX</b>, every <b>BAY</b> is an agent doing one step, and the belts you draw are the order the work flows.</p>
+      <div class="refit-guide-card refit-guide-wide" role="dialog" aria-modal="true" aria-labelledby="refit-guide-title">
+        <span class="refit-guide-kicker">REFIT · QUICK GUIDE</span><h3 id="refit-guide-title">Shape your station</h3>
+        <p class="refit-guide-lead">Add rooms, choose equipment, and make the space your own. When you want a repeatable workflow, connect an inbox, an agent’s bay, and an outbox.</p>
         <div class="refit-steps">
           <div class="refit-step" data-art="room">
             <span class="refit-step-n">1</span>
-            <b>DRAG A ROOM</b>
-            <span>Pick <b>ROOM</b>, drag on the grid. Your agent walks what you build.</span>
+            <b>MAKE SPACE</b>
+            <span>Choose <b>ROOM</b> and click or drag on the grid. Use <b>SURFACE</b> to change its floor.</span>
           </div>
           <div class="refit-step" data-art="bay">
             <span class="refit-step-n">2</span>
-            <b>CREW A BAY</b>
-            <span>Drop a <b>BAY</b> (PROP ▸ WORKFLOW), click it, assign an agent.</span>
+            <b>ASSIGN AN AGENT</b>
+            <span>Choose <b>PROPS → WORKSTATIONS &amp; WORKFLOWS</b> and place a <b>BAY</b>. Click it to choose an agent and describe their step.</span>
           </div>
           <div class="refit-step" data-art="belt">
             <span class="refit-step-n">3</span>
-            <b>WIRE THE BELT</b>
-            <span>Pick <b>BELT</b>, click one machine then the next. The belt lays itself — but it only carries work through a crewed <b>BAY</b> (INBOX ▸ BAY ▸ OUTBOX).</span>
+            <b>CONNECT THE STEPS</b>
+            <span>Choose <b>BELT</b>, then click the start and end objects. Connect <b>INBOX → BAY → OUTBOX</b>; the bay needs an assigned agent to do the work.</span>
           </div>
         </div>
-        <p class="refit-guide-foot">In a hurry? <b>LINES (9)</b> stamps a whole working layout you can edit. Every prop &amp; mechanic is in the <b>FIELD MANUAL</b> — SYSTEM ▸ FIELD MANUAL.</p>
-        <button class="btn-sm refit-primary" id="refit-guide-go">▸ START BUILDING</button>
+        <p class="refit-guide-foot">For a head start, choose <b>LAYOUTS (9)</b>, place a starter workflow, then configure its steps. <b>PREVIEW</b> shows animated routing; it does not run an AI job.</p>
+        <div class="refit-guide-shortcuts"><span><b>Wheel</b> Zoom</span><span><b>Space + drag</b> Pan</span><span><b>Ctrl + Z</b> Undo</span><span><b>Done</b> Save &amp; exit</span></div><button class="btn-sm refit-primary" id="refit-guide-go">START BUILDING</button>
       </div>`;
     root.appendChild(g);
     g.querySelectorAll('.refit-step').forEach(s => {
@@ -1608,6 +1866,43 @@ const Build = (() => {
     for (const iid of c.intakes) { const ip = station.propById(iid); if (ip && ip.label) return ip.label; }
     return null;
   }
+  /* REFIT-WORKFLOW-PURE-BEGIN */
+  // A graph readout, not a guessed linear sequence: branching and loops retain their real edges.
+  function workflowReadout(comp, plan, nameOf) {
+    const bays = (comp && comp.bays) || [];
+    const chains = (plan && plan.chains) || {};
+    const names = id => String(nameOf(id) || id);
+    const steps = bays.map(b => {
+      const ch = b.agentId && chains[b.agentId];
+      const destinations = ch ? (ch.next || []).map(names) : [];
+      if (ch && ch.outbox) destinations.push('Results outbox');
+      if (ch && ch.deadEnd) destinations.push('Disconnected end — connect a destination');
+      return { propId: b.propId, label: b.role || (b.agentId ? names(b.agentId) : 'Unassigned step'),
+        agent: b.agentId ? names(b.agentId) : 'Choose an agent',
+        receives: b.agentId && plan && plan.reach && plan.reach[b.agentId] ? 'Receives incoming work' : '',
+        sends: destinations.length ? destinations.join(' / ') : 'No confirmed onward route' };
+    });
+    const exits = bays.filter(b => b.agentId && chains[b.agentId] && chains[b.agentId].outbox).length;
+    return { steps,
+      start: comp && comp.intakes.length ? 'Inbox — configure what starts this workflow below' : 'No inbox on this line',
+      result: exits ? 'Connected to a results outbox' : 'No confirmed route to an outbox',
+      compact: (comp && comp.intakes.length ? 'Inbox' : 'No inbox') + ' → ' + bays.length + ' step' + (bays.length === 1 ? '' : 's') + ' → ' + (exits ? 'Outbox' : 'Check output route') };
+  }
+  /* REFIT-WORKFLOW-PURE-END */
+  function workflowHTML(comp) {
+    if (!comp) return '<div class="refit-note">Connect this inbox to a step to see its workflow.</div>';
+    const view = workflowReadout(comp, valPlan, agentLabelFor);
+    return '<section class="refit-workflow" aria-label="Workflow overview"><h4>Connected steps</h4>'
+      + '<p class="workflow-help">Click a step to choose its agent and instructions.</p>'
+      + view.steps.map(s => {
+        const prop = station.propById(s.propId), brief = prop && prop.brief;
+        const detail = [s.agent !== s.label ? s.agent : '', s.receives].filter(Boolean).join(' · ');
+        return '<button type="button" class="bb refit-workflow-step" data-workflow-step="' + esc(s.propId) + '"><b>' + esc(s.label) + '</b>' + (detail ? '<span>' + esc(detail) + '</span>' : '')
+          + '<span>' + (brief ? esc(String(brief).slice(0, 180)) + (String(brief).length > 180 ? '…' : '') : 'Add instructions for this step') + '</span>'
+          + '<span>Next → ' + esc(s.sends) + '</span><span class="refit-workflow-edit">Edit agent & instructions</span></button>';
+      }).join('')
+      + '<p><b>Result</b><br>' + esc(view.result) + '</p><p class="refit-workflow-note">Connections shown here describe where work will go. They do not mean a job has run.</p></section>';
+  }
   /* which position does this dock's agent hold on the COMPILED line? (inbox-trigger, 2026-08-05)
      'entry' = fed straight by an intake source (plan.reach — the BFS from every source), 'chain' = fed by an
      upstream dock's chain edge (plan.chains[..].next), null = unknowable (unbound dock / no compiled plan /
@@ -1634,15 +1929,15 @@ const Build = (() => {
      fact: the line from Pipeline.lineComponents, the hand-off from plan.chains (the sidecar's own route). */
   function lineFactHTML(bayId) {
     const comp = lineOfProp(bayId);
-    if (!comp) return 'not on a line yet — lay belts (7) or click-connect two machines to put this dock on one';
+    if (!comp) return 'Not connected yet. Close this panel, choose BELT, then click this Bay and the next prop to connect them.';
     const p = station.propById(bayId), aid = p && p.agentId;
     const ch = aid && valPlan && valPlan.chains && valPlan.chains[aid];
     const feeds = !ch ? null
-      : (ch.next && ch.next.length) ? 'feeds <b>' + esc(ch.next.map(agentLabelFor).join(' + ').toUpperCase()) + '</b>'
-      : ch.outbox ? 'ships to <b>OUTBOX</b>'
-      : ch.deadEnd ? 'its output <b>dead-ends</b> — belt it onward' : null;
-    return 'ON <b>' + esc((lineNameOf(comp) || 'an unnamed line').toUpperCase()) + '</b> — ' + comp.bays.length + ' dock' + (comp.bays.length === 1 ? '' : 's')
-      + (feeds ? ', ' + feeds : (aid ? ', feeds nothing yet' : ''));
+      : (ch.next && ch.next.length) ? 'Sends the result to <b>' + esc(ch.next.map(agentLabelFor).join(' + ')) + '</b>.'
+      : ch.outbox ? 'Sends the result to the <b>Outbox</b>.'
+      : ch.deadEnd ? 'No next step connected. Add a belt to another Bay or an Outbox.' : null;
+    return '<b>' + esc(lineNameOf(comp) || 'Unnamed workflow') + '</b> · ' + comp.bays.length + ' agent step' + (comp.bays.length === 1 ? '' : 's')
+      + '<p>' + (feeds || (aid ? 'No onward connection confirmed yet.' : 'Choose an agent to check this step’s route.')) + '</p>';
   }
   function refreshLineFacts() {
     if (!root) return;
@@ -1655,9 +1950,9 @@ const Build = (() => {
      addProp path a hand placement takes; never a flag). Reads bayObjectsMemoed — the same truth the nag draws. */
   function computeFactHTML(bayId) {
     const p = station.propById(bayId); if (!p || !p.agentId) return '';
-    if (bayObjectsMemoed(p.agentId).indexOf('computer') >= 0) return '<div class="step-fact">✓ <b>COMPUTE</b> — ' + esc(agentLabel(p.agentId)) + ' has a PC in this room</div>';
-    return '<div class="refit-note">NO COMPUTE — needs a PC assigned to <b>' + esc(agentLabel(p.agentId).toUpperCase()) + '</b> in this room, or routed work cannot run here</div>'
-      + '<button type="button" class="bb sm refit-primary refit-summon" id="step-pc">⊕ ADD A PC FOR ' + esc(agentLabel(p.agentId).toUpperCase()) + ' HERE</button>';
+    if (bayObjectsMemoed(p.agentId).indexOf('computer') >= 0) return '<div class="step-fact">✓ ' + esc(agentLabel(p.agentId)) + ' has a workstation for this step.</div>';
+    return '<div class="refit-note">' + esc(agentLabel(p.agentId)) + ' needs an assigned workstation in this room before this step can run.</div>'
+      + '<button type="button" class="bb sm refit-primary refit-summon" id="step-pc">⊕ ADD A WORKSTATION HERE</button>';
   }
   function requisitionPcFor(bayId) {
     const p = station.propById(bayId); if (!p || !p.agentId) return { ok: false, reason: 'uncrewed' };
@@ -1711,8 +2006,8 @@ const Build = (() => {
     const comp = lineOfProp(bayId);
     const lineTxt = lineFactHTML(bayId);
     const stepTxt = roleInfo
-      ? 'THIS STEP WANTS A <b>' + esc(p.role) + '</b> — ' + esc(roleInfo.desc)
-      : 'a dock — work routed here runs as its agent';
+      ? 'Suggested role: <b>' + esc(p.role) + '</b>. ' + esc(roleInfo.desc)
+      : 'Any agent can handle this step. Choose who should do the work.';
     /* WORK BELONGS TO A LINE (Andrew's ruling, 2026-08-07): "each conveyor system built has a purpose and
        a different workflow — the conveyor system should visually run ONLY when the specific workflow is
        running." So the dock has to SAY what makes its line distinct and when it runs. Both facts are read
@@ -1722,42 +2017,50 @@ const Build = (() => {
     const handsOn = !!(cur && valPlan && valPlan.chains && valPlan.chains[cur] && (valPlan.chains[cur].next || []).length);
     const runsTxt = !comp ? null
       : comp.intakes.length
-      ? 'IT RUNS when work arrives at this line’s <b>INBOX</b> — or when one of its routines fires.'
-      : 'IT RUNS when one of this line’s routines fires at a dock on it.';
+      ? 'This step runs when work reaches it from the workflow’s <b>Inbox</b> or a schedule for this workflow.'
+      : 'This step can run from a schedule assigned to this workflow.';
     const restTxt = (comp && (handsOn || comp.bays.length > 1))
-      ? 'A job you hand this agent yourself is answered right here and stops here — it does not run the rest of the line.'
+      ? 'A direct COMMS message only runs this agent. Start the workflow through its Inbox or schedule to include the other steps.'
       : null;
-    const rows = agents.map(a => `<button type="button" class="bb sm bay-agent${a.id === cur ? ' active' : ''}" data-aid="${esc(a.id)}">${esc(a.name || a.id)}</button>`).join('');
+    const rows = agents.map(a => `<button type="button" class="bb sm bay-agent${a.id === cur ? ' active' : ''}" data-aid="${esc(a.id)}" aria-pressed="${a.id === cur}">${esc(a.name || a.id)}</button>`).join('');
     const briefPh0 = 'what this step does with arriving work' + (roleInfo ? ' — e.g. ' + roleInfo.desc : '');
     const briefPh = BRIEF_PH[stepPositionOf(cur)] || briefPh0;
     const g = document.createElement('div');
-    g.className = 'refit-guide refit-step-card';
+    g.className = 'refit-guide refit-step-card refit-workflow-editor';
     g.innerHTML = `
-      <div class="refit-guide-card">
-        <h3>▮ STEP — ${esc(p.role || 'DOCK')}</h3>
-        ${flowStripHTML('bay')}
-        <div class="refit-form">
-        <div class="refit-sec">THE STEP</div>
-        <div class="step-fact">${stepTxt}</div>
-        <div class="step-fact" data-linefact="${esc(bayId)}">${lineTxt}</div>
-        ${runsTxt ? '<div class="step-fact">' + runsTxt + '</div>' : ''}
-        ${restTxt ? '<div class="refit-note">' + esc(restTxt) + '</div>' : ''}
-        <div class="refit-sec">THE AGENT — <span id="step-bound">${cur ? 'crewed by ' + esc(agentLabel(cur)) : 'uncrewed'}</span></div>
-        <div class="step-compute" id="step-compute"></div>
-        ${canSummon ? '<button type="button" class="bb sm refit-primary refit-summon" id="bay-summon">⊕ SUMMON A ' + esc(p.role) + ' HERE</button>' : ''}
+      <div class="refit-guide-card" role="dialog" aria-modal="true" aria-labelledby="workflow-title">
+        ${workflowIntroHTML('BAY · AGENT STEP', 'Give an agent a job', 'A Bay is one step in your workflow. Pick who works here and tell them what to do with each arriving task.')}
+        <div class="workflow-body workflow-columns">
+        <div class="workflow-main refit-form">
+        <section class="workflow-section"><h4><span>1</span> Choose an agent</h4>
+        ${roleInfo ? '<p class="workflow-help">' + stepTxt + '</p>' : ''}
+        <div id="step-bound" class="workflow-selection" role="status">${cur ? 'Assigned to ' + esc(agentLabel(cur)) : 'No agent selected yet'}</div>
+        ${agents.length > 8 ? '<input id="step-agent-search" class="refit-input" type="search" placeholder="Find an agent…" aria-label="Find an agent" />' : ''}
         ${agents.length ? '<div class="refit-agents refit-bay-agents" id="step-rows">' + rows + '</div>' : ''}
+        <p id="step-agent-empty" class="workflow-help" hidden>No matching agent. Try another name.</p>
+        ${canSummon ? '<button type="button" class="bb sm refit-summon" id="bay-summon">⊕ RECRUIT A ' + esc(p.role) + '</button>' : ''}
+        <details><summary>Assign by agent ID</summary>
         <input id="bay-aid" class="refit-input" type="text" maxlength="40" placeholder="${agents.length ? 'or type an agent id' : 'agent id — e.g. coder'}" value="${esc(cur)}" />
         <div class="refit-error" id="bay-err">unknown agent — pick one above, or check the id</div>
         <div class="refit-actions step-agent-actions">
           <button type="button" class="btn-sm" id="bay-ok">▸ ASSIGN</button>
-          <button type="button" class="btn-sm" id="bay-clear">UNBIND</button>
+          <button type="button" class="btn-sm" id="bay-clear">UNASSIGN</button>
         </div>
-        <div class="refit-sec">THE WORK — JOB BRIEF</div>
-        <textarea id="step-brief" class="refit-input refit-brief" maxlength="2000" rows="3" placeholder="${esc(briefPh)}">${esc(p.brief || '')}</textarea>
-        <div class="refit-note step-brief-note">rides every run this dock gets — saved on blur / Ctrl-Enter. It briefs the agent; it never changes who runs or what tools they hold.</div>
-        <div class="refit-actions">
+        </details>
+        <div class="step-compute" id="step-compute"></div></section>
+        <section class="workflow-section"><h4><span>2</span> What should they do?</h4>
+        <p class="workflow-help">For example: “Check the draft and return a corrected version.”</p>
+        <textarea id="step-brief" class="refit-input refit-brief" aria-label="Instructions for this step" maxlength="2000" rows="5" placeholder="${esc(briefPh)}">${esc(p.brief || '')}</textarea>
+        <div class="step-brief-note">These instructions apply to every task that reaches this step.</div></section>
+        </div>
+        <aside class="workflow-aside"><section class="workflow-section"><h4>Where the work goes</h4>
+        <div class="step-fact" data-linefact="${esc(bayId)}">${lineTxt}</div></section>
+        <section class="workflow-section"><h4>When it runs</h4>
+        <p class="workflow-help">${runsTxt || 'Connect this Bay to an Inbox or another Bay using the BELT tool.'}</p>
+        ${restTxt ? '<p class="workflow-help">' + esc(restTxt) + '</p>' : ''}</section></aside>
+        </div><div class="workflow-footer">
+          <span>Instructions save when you leave the field or close.</span>
           <button type="button" class="btn-sm refit-primary" id="step-done">✓ DONE</button>
-        </div>
         </div>
       </div>`;
     root.appendChild(g);
@@ -1768,13 +2071,21 @@ const Build = (() => {
     const clearErr = () => { input.classList.remove('is-error'); };
     const closeP = () => { saveBrief(); if (g.parentNode) g.parentNode.removeChild(g); };
     cardRegister(g, closeP);   // ESC closes THROUGH here, so the job brief is saved and never discarded
+    g.querySelector('[data-workflow-close]').onclick = closeP;
+    const agentSearch = g.querySelector('#step-agent-search');
+    if (agentSearch) agentSearch.oninput = () => {
+      const query = agentSearch.value.trim().toLowerCase();
+      let visible = 0;
+      g.querySelectorAll('.bay-agent').forEach(b => { b.hidden = !b.textContent.toLowerCase().includes(query); if (!b.hidden) visible++; });
+      g.querySelector('#step-agent-empty').hidden = visible > 0;
+    };
     // a bind/unbind UPDATES the card in place (the brief draft must survive crewing the dock) — the
     // one-surface law: configure the whole step here, close once.
     refreshComputeFact(g, bayId);
     const refreshBinding = () => {
       const live = station.propById(bayId), aid = (live && live.agentId) || '';
-      if (boundEl) boundEl.textContent = aid ? 'crewed by ' + agentLabel(aid) : 'uncrewed';   // the display NAME, never the raw id (the roster chips say RESEARCHER; this said "researcher")
-      g.querySelectorAll('.bay-agent').forEach(x => x.classList.toggle('active', x.dataset.aid === aid));
+      if (boundEl) boundEl.textContent = aid ? 'Assigned to ' + agentLabel(aid) : 'No agent selected yet';
+      g.querySelectorAll('.bay-agent').forEach(x => { x.classList.toggle('active', x.dataset.aid === aid); x.setAttribute('aria-pressed', String(x.dataset.aid === aid)); });
       refreshComputeFact(g, bayId);
       input.value = aid;
       // a bind can place this dock on the compiled line — re-read its position so the brief placeholder
@@ -1911,16 +2222,12 @@ const Build = (() => {
         if (station.beltAt(xx, yy)) return { x: xx, y: yy };
     return null;
   }
-  /* ---------- THE FLOW STRIP + FLOW CARD (belt-teach): ONE picture of the whole system, shown wherever
-     a workflow prop is touched, with the clicked piece lit — so the model accretes instead of fragmenting
-     across six prop descriptions. INBOX/OUTBOX clicks (no editor of their own) open the card directly. */
-  function flowStripHTML(hot) {
-    const seg = (id, label) => '<span class="flow-seg' + (id === hot ? ' hot' : '') + '">' + label + '</span>';
-    const ar = '<span class="flow-arrow">▸</span>';
-    return '<div class="refit-flowstrip"><div class="flow-line">'
-      + seg('intake', 'INBOX') + ar + seg('junction', 'SORT') + ar + seg('bay', 'BAY') + ar
-      + '<span class="flow-seg desk">DESK</span>' + ar + seg('bay', 'BAY') + ar + seg('outbox', 'OUTBOX')
-      + '</div><div class="flow-note">outside work rides IN to an agent’s dock · they work it at their desk · the finished result rides OUT. (COMMS orders skip the ride in — you gave them in person.)</div></div>';
+  // Each editor explains the clicked prop. Actual connections are shown in context,
+  // never as a generic diagram that implies extra props or a fixed workflow shape.
+  function workflowIntroHTML(kicker, title, description) {
+    return '<header class="workflow-header"><div><span class="workflow-kicker">' + esc(kicker) + '</span>'
+      + '<h3 id="workflow-title">' + esc(title) + '</h3><p>' + esc(description) + '</p></div>'
+      + '<button type="button" class="bb workflow-close" data-workflow-close aria-label="Close setup">✕</button></header>';
   }
   /* REFIT-JUNCTION-PURE-BEGIN (extraction marker — test/refit-junction-cards.test.js evals this block with
      injected deps; PURE: params + locals only, no module state, no DOM). The LOOP card's lane labels and the
@@ -1999,22 +2306,22 @@ const Build = (() => {
     const p = station.propById(propId); if (!p) return;
     cardCloseAll();
     finFocusLine(propId);
-    const hot = p.t === 'intake' ? 'intake' : p.t === 'outbox' ? 'outbox' : (p.t === 'filter' || p.t === 'splitter' || p.t === 'merger' || p.t === 'joiner' || p.t === 'loop') ? 'junction' : 'bay';
-    const TITLE = { intake: 'INBOX — WORK IN', outbox: 'OUTBOX — RESULTS OUT', merger: 'MERGER — LANES JOIN', splitter: 'SPLITTER — LANES BALANCE', joiner: 'JOINER — BRANCHES WAIT', loop: 'LOOP — GO ROUND AGAIN' };
+    const TITLE = { intake: 'Start this workflow', outbox: 'Collect the finished work', merger: 'Bring paths together', splitter: 'Send work down different paths', joiner: 'Wait for every part', loop: 'Repeat until the work is ready' };
+    const PROP_NAME = { intake: 'INBOX', outbox: 'OUTBOX', merger: 'MERGER', splitter: 'SPLITTER', joiner: 'JOINER', loop: 'LOOP' };
     const LINE = {
-      intake: 'This is where OUTSIDE work — a channel DM, a scheduled routine — physically arrives on the floor. Its TRIGGERS below decide why this line runs; wire one right here.',
-      outbox: 'Every job the crew actually FINISHES ships a green crate here; the pallet is today’s output. Click it (when quiet) for the LOGBOOK.',
+      intake: 'The Inbox is where work enters. Give your workflow a name, then choose how tasks arrive.',
+      outbox: 'The Outbox receives completed work. Connect the last Bay to it with a belt; there are no settings to fill in here.',
       // honest by construction: the harness runs each work-item on its own, so the floor must show each
       // one arriving. A merger tidies several lanes into one — it never combines the JOBS riding them.
-      merger: 'Where several belt lanes join into one. Every crate rides straight through — a merger tidies the LANES, it does not combine the jobs on them (each still runs on its own). Nothing to configure.',
+      merger: 'Connect several belts into one outgoing belt. Each task keeps going separately. This joins paths, not the contents of the tasks.',
       // the splitter's counterpart card: it balances UNOWNED work across its out-lanes; addressed
       // jobs still ride home (junctionLaneOwners). Nothing to configure — topology does the work.
-      splitter: 'Where one lane fans into several. Unowned work balances across the out-lanes; addressed jobs (crons, bound chats) still take the lane that leads to their owner’s bay. Nothing to configure.',
+      splitter: 'Connect one incoming belt to several outgoing belts. Tasks without an assigned agent are spread across those paths. Tasks already assigned to an agent follow that agent’s path.',
       // the joiner is the barrier the merger never was: one crate per in-lane is HELD per job until every branch
       // has delivered (or the timeout passes), then ONE merged crate leaves — the sidecar chain runner performs it.
-      joiner: 'Where parallel branches of ONE job come back together. Each branch’s result is held here until every in-lane has delivered (10 minutes at most — then it goes on, marked partial), and a single merged crate continues. A SPLITTER upstream of a JOINER runs all its lanes, not one.',
+      joiner: 'Bring together the results from parallel parts of the same job. Work waits here for every part, then continues as one combined result.',
       // a bounded cycle: the gate is the only legal way round; the runner counts passes per job
-      loop: 'The gate that lets a line go round again. One lane leads BACK to an upstream dock, the other is DONE. Work re-enters until the reviewer’s last line says VERDICT: approved (or up to MAX PASSES, default 5 — the line’s dollar cap still binds), then leaves on DONE. A cycle drawn without a LOOP is refused.'
+      loop: 'Send work back for another attempt, then let it continue when your chosen condition is met. Connect one path back to an earlier Bay and one path onward.'
     };
     const line = LINE[p.t] || LINE.outbox;
     /* LINE NAMING (workflow studio, 2026-08-05): the INTAKE is a line's front door, so its card names the
@@ -2023,11 +2330,11 @@ const Build = (() => {
        what the Commander types is saved. Legibility only — the finish-the-line header + the intake glance
        read it; routing never does. Multiple lines on one floor become nameable systems. */
     const isIntake = p.t === 'intake';
-    const namePh = isIntake ? (stampNameOf[p.id] || 'name this line') : '';
+    const namePh = isIntake ? (stampNameOf[p.id] || 'e.g. Weekly news summary') : '';
     const nameHtml = isIntake
-      ? '<div class="refit-sec">LINE NAME</div>'
-        + '<input id="line-name" class="refit-input" type="text" maxlength="48" placeholder="' + esc(namePh) + '" value="' + esc(p.label || '') + '" />'
-        + '<div class="refit-note">names this whole line (shown on its checklist + this INBOX\'s glance) — saved on Enter / blur</div>'
+      ? '<section class="workflow-section"><h4><span>1</span> Name your workflow</h4>'
+        + '<input id="line-name" class="refit-input" type="text" aria-label="Workflow name" maxlength="48" placeholder="' + esc(namePh) + '" value="' + esc(p.label || '') + '" />'
+        + '<p class="workflow-help">Choose a name that reminds you what this workflow does.</p></section>'
       : '';
     /* LINE BUDGET (2026-08-21): the line's own ceilings, set at its front door like its name. Rides the intake
        prop as `limits` (worldmodel.setPropLimits -> migrate() whitelist), compiles onto plan.lines[].limits
@@ -2060,9 +2367,9 @@ const Build = (() => {
     const jnField = (id, label, min, max, step, val, ph) => '<label class="refit-field lb-field" for="' + id + '">' + label
       + '<input id="' + id + '" class="refit-num lb-num" type="number" min="' + min + '" max="' + max + '" step="' + step + '" placeholder="' + esc(ph) + '" value="' + esc(val) + '" /></label>';
     const joinerHtml = isJoiner
-      ? '<div class="refit-sec">TIMEOUT — PARTIAL RELEASE</div>'
+      ? '<section class="workflow-section"><h4>How long should it wait?</h4>'
         + jnField('jn-timeout', 'minutes to wait for a late branch', 1, 120, 1, p.timeoutMin ? String(p.timeoutMin) : '', '10')
-        + '<div class="refit-note" id="jn-note">if a branch has not delivered after this long, the crate goes on with the branches that did arrive, marked PARTIAL — so one stuck lane never stalls the line. blank = 10 · 1–120 — saved on Enter / blur</div>'
+        + '<div class="workflow-help" id="jn-note">If a part is late, the available results continue without it, marked PARTIAL. Leave blank for 10 minutes. Choose 1–120 minutes.</div></section>'
       : '';
     // LOOP: the gate's REAL exits, read off the compiled plan in its local frame (junctionBeltTile = the
     // compiler's attach tile), each labelled by direction AND destination ("E → OUTBOX" / "S → to WRITER").
@@ -2073,13 +2380,13 @@ const Build = (() => {
     const loopMaxCeil = (typeof Pipeline !== 'undefined' && Pipeline.LOOP_MAX_CEILING) || 20;
     const loopDoneCur = (p.done && loopExits.some(x => x.dir === p.done)) ? p.done : (loopExits[0] ? loopExits[0].dir : null);
     const loopHtml = isLoop
-      ? '<div class="refit-sec">DONE LANE — WHERE THE CRATE LEAVES</div>'
+      ? '<section class="workflow-section"><h4><span>1</span> Where should finished work go?</h4>'
         + (loopExits.length
             ? '<div class="refit-agents loop-exits" id="loop-exits">' + loopExits.map(x => '<button type="button" class="bb sm loop-exit' + (x.dir === loopDoneCur ? ' active' : '') + '" data-dir="' + x.dir + '">'
                 + esc(x.label) + '</button>').join('') + '</div>'
               + '<div class="step-fact" id="loop-back">' + esc(loopBackTxt(loopExits, loopDoneCur)) + '</div>'
-            : '<div class="refit-note bad">lay belts OUT of this gate first — it needs two exits: one onward, one back</div>')
-        + '<div class="refit-sec">HOW MANY TIMES ROUND</div>'
+            : '<div class="refit-note bad">Add two outgoing belts first: one to the next step and one back to an earlier Bay.</div>')
+        + '</section><section class="workflow-section"><h4><span>2</span> Limit the number of attempts</h4>'
         + jnField('loop-max', 'MAX PASSES', 1, loopMaxCeil, 1, p.maxIter ? String(p.maxIter) : '', String(loopMaxDef))
         /* the verdict is a pick, not a free word, and the picks are the ONLY words the sidecar's loop gate
            (routing/chain.js) can ever read: two VERDICT words (`VERDICT: approved` / `VERDICT: revise` — the
@@ -2087,13 +2394,17 @@ const Build = (() => {
            and the three content tags the same classifier a FILTER sorts by can produce (classify.js getTag).
            A verdict word flips the rule: the crate goes round UNTIL the verdict says it (revise / no verdict =
            round again); a classifier tag keeps it going round WHILE the output reads as that kind of work. */
-        + '<div class="refit-route-row loop-when-row"><span class="refit-route-lbl">LOOP UNTIL VERDICT →</span>'
+        + '<p class="workflow-help">A pass is one attempt. The workflow stops repeating when it reaches this limit.</p></section>'
+        + '<section class="workflow-section"><h4><span>3</span> When should it stop repeating?</h4>'
+        + '<p class="workflow-help">Choose the reviewer’s verdict that lets work move on.</p>'
+        + '<div class="refit-route-row loop-when-row">'
         + [['approved', 'APPROVED'], ['revise', 'REVISE']].map(([tag, lbl]) => '<button type="button" class="bb sm loop-when loop-verdict' + (p.when === tag ? ' sel' : '') + '" data-tag="' + tag + '">' + lbl + '</button>').join('')
         + '</div>'
-        + '<div class="refit-route-row loop-when-row"><span class="refit-route-lbl">…OR GO ROUND WHILE →</span>'
+        + '<details class="workflow-extra"' + (p.when && p.when !== 'approved' && p.when !== 'revise' ? ' open' : '') + '><summary>Repeat based on content instead</summary>'
+        + '<p class="workflow-help">Repeat while the result matches this type. Other results move on.</p><div class="refit-route-row loop-when-row">'
         + [['code', 'CODE'], ['research', 'RESEARCH'], ['general', 'GENERAL']].map(([tag, lbl]) => '<button type="button" class="bb sm loop-when' + (p.when === tag ? ' sel' : '') + '" data-tag="' + tag + '">' + lbl + '</button>').join('')
-        + '</div>'
-        + '<div class="refit-note" id="loop-note">' + esc(loopRuleTxt(p.when, loopMaxDef)) + ' blank max = ' + loopMaxDef + ' · ceiling ' + loopMaxCeil + ' — saved on Enter / blur</div>'
+        + '</div></details>'
+        + '<div class="workflow-help" id="loop-note">' + esc(loopRuleTxt(p.when, p.maxIter || loopMaxDef)) + ' Blank max = ' + loopMaxDef + '.</div></section>'
       : '';
     /* ---------- THE TRIGGER ZONE (inbox-trigger, 2026-08-05) ----------
        The INBOX card is the workflow's WHY, completing the loop the floor already draws: trigger (INBOX) →
@@ -2130,22 +2441,21 @@ const Build = (() => {
       return 'skips ' + skipped.map(a => agentLabelFor(a)).join(' and ') + ' — the line runs from ' + agentLabelFor(aid) + ' on (' + (docks.length - i) + ' of ' + docks.length + ' stages)';
     };
     const trgHtml = isIntake
-      ? '<div class="refit-sec">TRIGGERS — WHY THIS LINE RUNS</div>'
+      ? '<section class="workflow-section"><h4><span>2</span> Choose how it starts</h4>'
         // WORK BELONGS TO A LINE (2026-08-07): the trigger zone is where the Commander decides WHY this line
         // runs, so it is where the rule belongs — only work that comes in through one of these triggers runs
         // the whole line. Plain language; the same fact the STEP card states from the dock's side.
         // It is an EXPLANATION, not a warning, so it reads in the dim voice (.trg-explain) — .refit-note is
         // amber, and an amber paragraph on every INBOX card teaches the Commander to ignore amber.
-        + '<div class="trg-explain">Only work that comes in one of these ways runs this whole line. A job you hand an agent yourself is answered at its own dock and stops there.</div>'
-        + '<div class="step-fact" id="trg-feed">checking the wires…</div>'
-        + '<div id="trg-routines" class="trg-list"></div>'
-        + '<button type="button" class="bb sm refit-primary refit-summon" id="trg-new" aria-expanded="false">⊕ NEW ROUTINE FOR THIS LINE</button>'
+        + '<p class="trg-explain">Use a schedule or a connected channel to start this workflow. A direct COMMS message only runs the agent you message.</p>'
+        + '<div class="workflow-start-options"><button type="button" class="bb workflow-choice" id="trg-new" aria-expanded="false" aria-controls="trg-form"><b>On a schedule</b><span>Choose a task and when it runs.</span></button>'
+        + '<button type="button" class="bb workflow-choice" id="trg-chan"><b>From a channel</b><span>Set up incoming messages in Channels.</span></button></div>'
         // the create form is ONE bordered object (same vocabulary as AUTOMATION's inline RESCHEDULE editor):
         // opened from the ⊕ button, it used to be a stack of loose fields with no edge, so on a card that is
         // already six zones tall there was nothing saying where the form began or ended.
         + '<div id="trg-form" class="trg-form" style="display:none">'
-          + '<div class="trg-form-k">WHAT SHOULD IT DO?</div>'
-          + '<textarea id="trg-prompt" class="refit-input refit-brief" maxlength="2000" rows="2" placeholder="what should each run do? e.g. search for new AI-policy news and summarize the top 3"></textarea>'
+          + '<label class="trg-form-k" for="trg-prompt">What task should start each run?</label>'
+          + '<textarea id="trg-prompt" class="refit-input refit-brief" maxlength="2000" rows="3" placeholder="e.g. Find this week’s AI news and summarize the three biggest stories."></textarea>'
           /* WHEN — the SAME schedule picker the AUTOMATION window mounts (frontend/app/schedpicker.js), not a
              second dialect of "when". It owns the `#trg-sched` text input and TYPES into it, so the server
              preview, the create POST and every selector below are byte-identical to what they always were;
@@ -2159,29 +2469,35 @@ const Build = (() => {
           + '</div>'
           + '<div class="trg-preview" id="trg-preview"></div>'
           + (docks.length > 1
-              ? '<div class="refit-sec">FIRES AT</div><div class="refit-agents" id="trg-docks">' + docks.map(dockChip).join('') + '</div>'
+              ? '<details class="workflow-extra"><summary>Starting agent · ' + esc(agentLabelFor(trgDock)) + '</summary><p class="workflow-help">Usually, start with the first agent. Choosing a later step skips the steps before it.</p><div class="refit-agents" id="trg-docks">' + docks.map(dockChip).join('') + '</div>'
                 + '<div class="step-fact trg-dock-hint" id="trg-dock-hint">' + esc(dockHint(trgDock)) + '</div>'
+                + '</details>'
               : docks.length === 1
               ? '<div class="step-fact">fires at <b>' + esc((docks[0].role ? docks[0].role + ' · ' : '') + agentLabelFor(docks[0].agentId)) + '</b> — this line’s ' + (entryDocks.length ? 'entry dock' : 'dock') + '</div>'
-              : '<div class="refit-note">crew a dock first — a routine fires at an agent</div>')
-          + '<div class="refit-actions"><button type="button" class="btn-sm refit-primary" id="trg-create"' + (docks.length ? '' : ' disabled') + '>▸ CREATE ROUTINE</button><button type="button" class="btn-sm" id="trg-cancel">CANCEL</button></div>'
+              : '<div class="refit-note">Assign an agent to a connected Bay first. The schedule needs an agent to start the work.</div>')
+          + '<div class="refit-actions"><button type="button" class="btn-sm refit-primary" id="trg-create"' + (docks.length ? '' : ' disabled') + '>▸ SAVE SCHEDULE</button><button type="button" class="btn-sm" id="trg-cancel">CANCEL</button></div>'
           + '<div class="refit-note trg-msg" id="trg-msg" style="display:none"></div>'
         + '</div>'
-        + '<div class="refit-actions trg-doors"><button type="button" class="btn-sm" id="trg-chan">⌁ CONNECT A CHANNEL</button><button type="button" class="btn-sm" id="trg-auto">▸ MANAGE IN AUTOMATION</button></div>'
+        + '<details class="workflow-extra"><summary>Existing schedules & connections</summary><div class="step-fact" id="trg-feed">Checking connections…</div><div id="trg-routines" class="trg-list"></div>'
+        + '<div class="refit-actions trg-doors"><button type="button" class="btn-sm" id="trg-auto">MANAGE SCHEDULES</button></div></details></section>'
       : '';
     const g = document.createElement('div');
-    // the INTAKE card is the only flow card carrying a form (the trigger zone) — it gets a little more glass
-    g.className = 'refit-guide refit-flow-card' + (isIntake ? ' refit-flow-intake' : '');
-    g.innerHTML = '<div class="refit-guide-card"><h3>▮ ' + (TITLE[p.t] || TITLE.outbox) + '</h3>'
-      + flowStripHTML(hot)
-      + '<ul><li>' + line + '</li></ul>'
-      + nameHtml
-      + budgetHtml
-      + joinerHtml
-      + loopHtml
-      + trgHtml
-      + '<div class="refit-actions"><button type="button" class="btn-sm refit-primary" id="flow-ok">✓ GOT IT</button></div></div>';
+    g.className = 'refit-guide refit-flow-card refit-workflow-editor' + (isIntake ? ' refit-flow-intake' : '');
+    const help = p.t === 'joiner' ? 'Connect each parallel path to this Joiner, then connect its outgoing belt to the next step. A Splitter feeding a Joiner runs all its paths for the same job.'
+      : p.t === 'loop' ? 'Use the BELT tool to connect this Loop to an earlier Bay and to the next step. The labels beside each exit come from the belts you actually connected.'
+      : p.t === 'outbox' ? 'Leave Build mode and click the Outbox to browse delivered work in the Logbook.'
+      : 'The belts determine the paths. Close this panel, choose BELT, then click one prop and the next to connect them.';
+    g.innerHTML = '<div class="refit-guide-card" role="dialog" aria-modal="true" aria-labelledby="workflow-title">'
+      + workflowIntroHTML((PROP_NAME[p.t] || 'WORKFLOW') + ' · SETUP', TITLE[p.t] || TITLE.outbox, line)
+      + '<div class="workflow-body' + (isIntake || isJoiner || isLoop ? ' workflow-columns' : '') + '"><div class="workflow-main">' + nameHtml + trgHtml + joinerHtml + loopHtml
+      + (!isIntake && !isJoiner && !isLoop ? '<section class="workflow-section workflow-no-settings"><h4>No extra settings needed</h4><p>' + esc(help) + '</p></section>' : '')
+      + (budgetHtml ? '<details class="refit-workflow-advanced"><summary>Optional limits</summary>' + budgetHtml + '</details>' : '')
+      + '</div>' + (isIntake || isJoiner || isLoop ? '<aside class="workflow-aside">'
+      + (isIntake ? workflowHTML(comp) : '<section class="workflow-section"><h4>Connect it on the station</h4><p class="workflow-help">' + esc(help) + '</p></section>')
+      + '</aside>' : '') + '</div><div class="workflow-footer"><span>' + (isIntake ? 'Names save as you edit. Schedules need SAVE SCHEDULE.' : isJoiner || isLoop ? 'Settings save when you leave a field or close.' : 'Connections are made with the BELT tool.')
+      + '</span><button type="button" class="btn-sm refit-primary" id="flow-ok">✓ DONE</button></div></div>';
     root.appendChild(g);
+    g.querySelectorAll('[data-workflow-step]').forEach(b => { b.onclick = () => openStepCard(b.dataset.workflowStep); });
     requestAnimationFrame(() => g.classList.add('refit-swap'));
     let savedLabel = p.label || '';
     const nameIn = g.querySelector('#line-name');
@@ -2292,6 +2608,7 @@ const Build = (() => {
     });
     const closeP = () => { saveName(); saveLimits(); saveGate(); if (g.parentNode) g.parentNode.removeChild(g); };
     cardRegister(g, closeP);   // ESC closes THROUGH here, so the line name + budget + gate config are saved and never discarded
+    g.querySelector('[data-workflow-close]').onclick = closeP;
     /* ---- trigger-zone wiring (intake only; every claim below is a server answer, never synthesized) ---- */
     if (isIntake) {
       const feedEl = g.querySelector('#trg-feed'), listEl = g.querySelector('#trg-routines');
@@ -2372,14 +2689,15 @@ const Build = (() => {
         trgDock = b.dataset.aid; sfx('click');
         g.querySelectorAll('.trg-dock').forEach(x => x.classList.toggle('active', x.dataset.aid === trgDock));
         const hintEl = g.querySelector('#trg-dock-hint'); if (hintEl) hintEl.textContent = dockHint(trgDock);
+        b.closest('details').querySelector('summary').textContent = 'Starting agent · ' + agentLabelFor(trgDock);
       });
-      // ONE opener, one closer: while the form is up the ⊕ button steps aside (the form's own CANCEL closes
-      // it), so a card that is already tall never shows two controls for the same door.
+      // Keep the chosen start method visible above its form, so its purpose stays clear while editing.
       const showForm = on => {
         formEl.style.display = on ? '' : 'none';
-        newBtn.style.display = on ? 'none' : '';
+        newBtn.classList.toggle('active', on);
         newBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
         if (on) promptEl.focus();
+        else newBtn.focus();
       };
       newBtn.onclick = () => { sfx('click'); showForm(formEl.style.display === 'none'); };
       g.querySelector('#trg-cancel').onclick = () => { sfx('click'); showForm(false); };
@@ -2402,17 +2720,30 @@ const Build = (() => {
         const lname2 = lineNameOf(comp);
         const name = (lname2 ? lname2 + ' — ' : '') + (prompt.length > 48 ? prompt.slice(0, 45) + '…' : prompt);
         fetch(finApi('/api/cron'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, prompt, schedule, agentId: trgDock, provider, tz, runsLine: true }) })
-          .then(r => r.json()).then(r => {
-            btn.disabled = false;
-            if (r && r.error) { sfx('bad'); say('✕ ' + r.error, true); return; }
+          .then(async response => {
+            const r = await response.json();
+            const refuse = message => { btn.disabled = false; sfx('bad'); say('✕ ' + message, true); };
+            if (r && r.error) { refuse(r.error); return; }
             // mint-gate refusals are 200s with no error key (declined / near-duplicate name — the auto-named
             // "<LINE> — <prompt…>" form collides easily): claiming "✓ routine scheduled" over them discarded
             // the new trigger silently. Same fix as AUTOMATION / MAKE ROUTINE.
-            if (r && r.declined) { sfx('bad'); say('✕ ' + (r.message || 'this routine name was deleted before — reword the brief'), true); return; }
-            if (r && r.duplicate) { sfx('bad'); say('✕ a similar routine already exists' + (r.job && r.job.name ? (' ("' + r.job.name + '")') : '') + ' — reword the brief; nothing new was created', true); return; }
+            if (r && r.declined) { refuse(r.message || 'this routine name was deleted before — reword the brief'); return; }
+            if (r && r.duplicate) { refuse('a similar routine already exists' + (r.job && r.job.name ? (' ("' + r.job.name + '")') : '') + ' — reword the brief; nothing new was created'); return; }
+            if (!response.ok || !r || r.ok !== true || !r.job || !r.job.id) {
+              refuse('save not confirmed — check AUTOMATION before retrying'); return;
+            }
+            // The open card's scheduler snapshot can be stale, and a create acknowledgement alone is not
+            // proof that the job is visible. Confirm the exact saved id through the same list AUTOMATION reads.
+            const readback = await fetch(finApi('/api/cron'), { cache: 'no-store' });
+            const current = readback.ok ? await readback.json() : null;
+            const saved = current && Array.isArray(current.jobs) && current.jobs.find(job => job.id === r.job.id);
+            if (!saved || current.degraded) { refuse('save not confirmed — check AUTOMATION before retrying'); return; }
+            schedulerArmed = !!(current.enabled && !current.halted);
+            btn.disabled = false;
             sfx('chime');
-            // honest confirm: never claim "scheduled" over a disarmed scheduler (same law as AUTOMATION)
-            say(schedulerArmed ? '✓ routine scheduled — fires at ' + agentLabelFor(trgDock) : '✓ saved — but the scheduler is OFF; enable it in AUTOMATION', !schedulerArmed);
+            if (saved.state === 'completed') say('✓ routine completed — see its result in AUTOMATION');
+            else if (!saved.enabled) say('✓ saved — this routine is paused; manage it in AUTOMATION', true);
+            else say(schedulerArmed ? '✓ routine scheduled — fires at ' + agentLabelFor(trgDock) : '✓ saved — but scheduling is OFF or STOPPED; enable it in AUTOMATION', !schedulerArmed);
             // clear the BRIEF (the next routine is a different job) but keep the WHEN preview: the picker
             // still holds that schedule, so blanking its "next fires" line left the form looking unset
             // while it was in fact still armed on the same cadence.
@@ -2424,7 +2755,7 @@ const Build = (() => {
             if (opts && opts.world && typeof opts.world.pollFeed === 'function') {
               try { Promise.resolve(opts.world.pollFeed()).then(paintFeed).catch(() => {}); } catch (e) {}
             }
-          }).catch(() => { btn.disabled = false; sfx('bad'); say('✕ could not reach the sidecar — nothing was created', true); });
+          }).catch(() => { btn.disabled = false; sfx('bad'); say('✕ save not confirmed — check AUTOMATION before retrying', true); });
       };
       // the two doors: the SAME openers the finish card / NO FEED nag promise. Both leave REFIT (saving).
       g.querySelector('#trg-chan').onclick = () => { sfx('click'); closeP(); close(); if (typeof StationUI !== 'undefined' && StationUI.openTerm) StationUI.openTerm('messaging'); };
@@ -2457,14 +2788,16 @@ const Build = (() => {
       if (!r.agents.length && !r.unbound && !r.outbox && !r.deadEnd) li.push('This tile isn’t on the compiled line yet — connect it to a machine.');
     } else li.push('No compiled route yet — lay the line to a machine and this card reads its destination.');
     const g = document.createElement('div');
-    g.className = 'refit-guide refit-belt-card';
-    g.innerHTML = '<div class="refit-guide-card"><h3>▮ BELT — LANE ' + (DIRWORD[dir] || dir) + '</h3>'
-      + '<ul>' + li.map(s => '<li>' + s + '</li>').join('') + '</ul>'
-      + '<div class="refit-actions"><button type="button" class="btn-sm refit-primary" id="belt-ok">✓ GOT IT</button></div></div>';
+    g.className = 'refit-guide refit-belt-card refit-workflow-editor';
+    g.innerHTML = '<div class="refit-guide-card" role="dialog" aria-modal="true" aria-labelledby="workflow-title">'
+      + workflowIntroHTML('BELT · ' + (DIRWORD[dir] || dir), 'Where this belt takes work', 'Belts connect the steps in your workflow. Their direction decides where work travels next.')
+      + '<div class="workflow-body"><section class="workflow-section"><h4>Connected destinations</h4><ul>' + li.map(s => '<li>' + s + '</li>').join('') + '</ul></section></div>'
+      + '<div class="workflow-footer"><span>Choose BELT to connect another pair of props.</span><button type="button" class="btn-sm refit-primary" id="belt-ok">✓ DONE</button></div></div>';
     root.appendChild(g);
     requestAnimationFrame(() => g.classList.add('refit-swap'));
     const closeP = () => { if (g.parentNode) g.parentNode.removeChild(g); };
     cardRegister(g, closeP);
+    g.querySelector('[data-workflow-close]').onclick = closeP;
     g.querySelector('#belt-ok').onclick = () => { sfx('click'); closeP(); };
     g.addEventListener('click', e => { if (e.target === g) closeP(); });
   }
@@ -2474,7 +2807,7 @@ const Build = (() => {
     cardCloseAll();
     const p = station.propById(propId); if (!p || p.t !== 'filter') return;
     const g = document.createElement('div');
-    g.className = 'refit-guide refit-junction-editor';
+    g.className = 'refit-guide refit-junction-editor refit-workflow-editor';
     const closeP = () => { if (g.parentNode) g.parentNode.removeChild(g); };
     cardRegister(g, closeP);
 
@@ -2483,21 +2816,28 @@ const Build = (() => {
       // junctionBeltTile), so a ring-attached filter is configurable, not a dead editor.
       const jt = junctionBeltTile(p);
       const lanes = jt ? junctionOutLanes(jt.x, jt.y) : [];
+      const origin = (cacheGeo && cacheGeo.origin) || { tx: 0, ty: 0 };
+      const exits = jt ? loopExitLabels(valPlan, { x: jt.x - origin.tx, y: jt.y - origin.ty }, agentLabelFor) : [];
       const cur = { routes: (p.routes && typeof p.routes === 'object') ? Object.assign({}, p.routes) : {}, def: p.def || null };
       const selOf = tag => (tag === '__def__' ? cur.def : cur.routes[tag]);
       const ROWS = [['code', 'CODE'], ['research', 'RESEARCH'], ['__def__', 'EVERYTHING ELSE']];
       const rowHtml = ROWS.map(([tag, label]) => {
         const btns = lanes.length
-          ? lanes.map(d => '<button type="button" class="bb sm lane-btn' + (selOf(tag) === d ? ' sel' : '') + '" data-tag="' + tag + '" data-dir="' + d + '">' + J_ARROW[d] + '</button>').join('')
-          : '<span class="refit-note bad">lay belts OUT of this filter first</span>';
-        return '<div class="refit-route-row"><span class="refit-route-lbl">' + label + ' →</span>' + btns + '</div>';
+          ? lanes.map(d => '<button type="button" class="bb sm lane-btn' + (selOf(tag) === d ? ' sel' : '') + '" data-tag="' + tag + '" data-dir="' + d + '" aria-pressed="' + (selOf(tag) === d) + '">' + esc(exits.find(x => x.dir === d)?.label || d + ' ' + J_ARROW[d]) + '</button>').join('')
+          : '<span class="refit-note bad">Connect an outgoing belt first.</span>';
+        return '<div class="refit-route-row"><span class="refit-route-lbl">' + label + '</span><div class="workflow-lane-options">' + btns + '</div></div>';
       }).join('');
-      g.innerHTML = '<div class="refit-guide-card"><h3>▮ FILTER — route by content</h3>' + flowStripHTML('junction')
-        + '<ul><li>Each <b>kind</b> of work routes to the out-lane you pick; the rest take <b>EVERYTHING ELSE</b>. Sorting applies to <b>unowned</b> work — addressed jobs (crons, bound chats) ride straight to their owner’s bay.</li>'
-        + '<li>Put a <b>BAY</b> on a lane to send that work to a specific agent.</li></ul>'
-        + '<div class="refit-filter-rows">' + rowHtml + '</div>'
-        + '<div class="refit-actions"><button type="button" class="btn-sm refit-primary" id="j-ok">▸ SAVE ROUTES</button><button type="button" class="btn-sm" id="j-clear">CLEAR</button><button type="button" class="btn-sm" id="j-cancel">CANCEL</button></div></div>';
+      g.innerHTML = '<div class="refit-guide-card" role="dialog" aria-modal="true" aria-labelledby="workflow-title">'
+        + workflowIntroHTML('FILTER · SORT TASKS', 'Send each kind of task the right way', 'Choose a path for coding tasks, research tasks and everything else. The Filter reads each task and sends it along the matching belt.')
+        + '<div class="workflow-body workflow-columns"><div class="workflow-main"><section class="workflow-section"><h4>Choose a destination for each kind</h4>'
+        + '<p class="workflow-help">“Everything else” is the fallback. Set it so other tasks have somewhere to go.</p>'
+        + '<div class="refit-filter-rows">' + rowHtml + '</div></section></div>'
+        + '<aside class="workflow-aside"><section class="workflow-section"><h4>Which tasks get sorted?</h4>'
+        + '<p class="workflow-help">Tasks without an assigned agent use these rules. A task already addressed to an agent follows that agent’s path.</p></section>'
+        + '<section class="workflow-section"><h4>Need another destination?</h4><p class="workflow-help">Close this panel and use BELT to connect this Filter to another Bay. Its destination appears here.</p></section></aside></div>'
+        + '<div class="workflow-footer"><span>Save routes to apply your choices.</span><button type="button" class="btn-sm" id="j-clear">CLEAR ROUTES</button><button type="button" class="btn-sm" id="j-cancel">CANCEL</button><button type="button" class="btn-sm refit-primary" id="j-ok">▸ SAVE ROUTES</button></div></div>';
       root.appendChild(g);
+      g.querySelector('[data-workflow-close]').onclick = closeP;
       requestAnimationFrame(() => g.classList.add('refit-swap'));
       g.querySelectorAll('.lane-btn').forEach(b => b.onclick = () => {
         const tag = b.dataset.tag, dir = b.dataset.dir;
@@ -2505,6 +2845,7 @@ const Build = (() => {
         else if (cur.routes[tag] === dir) delete cur.routes[tag]; else cur.routes[tag] = dir;
         g.querySelectorAll('.lane-btn[data-tag="' + tag + '"]').forEach(x => {
           x.classList.toggle('sel', selOf(tag) === x.dataset.dir);
+          x.setAttribute('aria-pressed', String(selOf(tag) === x.dataset.dir));
         });
       });
       g.querySelector('#j-ok').onclick = () => {
@@ -2560,7 +2901,7 @@ const Build = (() => {
 
   /* ---------- test run (Polish B): send work down your belts with NO bot connected, and watch it sort to the
      bays right here in REFIT — the build-time payoff + the first thing a tutorial points at.
-     THE NARRATED RIDE (2026-07-05): ▸ TEST now teaches the whole two-trip model as it happens — numbered
+     THE NARRATED RIDE (2026-07-05): ▸ PREVIEW now teaches the whole two-trip model as it happens — numbered
      captions land at each stage (① enters → ② sorted → ③ delivered to the dock → ④ result ships from the
      dock → ⑤ out), and a delivered test crate spawns a RETURN product crate so the outbound leg shows too.
      Ephemeral, REFIT-preview only, driven by the same engine decisions real work rides on. ---------- */
@@ -2616,7 +2957,7 @@ const Build = (() => {
     // "held for the batch" branch described a combine the harness never performed; see chooseExit).
   }
   // the INTAKE's belt-adjacent tile (where a box spawns), or null if no INTAKE sits on a belt.
-  // DOC-ORDER FIRST INTAKE — kept ONLY as the manual ▸ TEST's last-resort fallback when no
+  // DOC-ORDER FIRST INTAKE — kept ONLY as the manual ▸ PREVIEW's last-resort fallback when no
   // compiled lane reaches a bound dock yet (the "③ SANK" caption is the honest teaching there).
   function intakeBeltTile() {
     const intake = station.props().find(p => p.t === 'intake');
@@ -2634,7 +2975,7 @@ const Build = (() => {
      (mirror of ghostline's spawn rule + world.js's addressed-crate physics):
        • agentId given (the line under test — the first ride names the dock whose reach flipped) →
          Pipeline.sourceFor: the mouth whose lane actually REACHES that dock, or null (no guess);
-       • lineless (the toolbar ▸ TEST) → the first source in PLAN order with a reaching mouth.
+       • lineless (the toolbar ▸ PREVIEW) → the first source in PLAN order with a reaching mouth.
      Plan mouths are LOCAL-frame (valPlan compiles from cacheGeo) → rebase by the geo origin,
      the same rebase testStops() rides. */
   function rideMouthFor(agentId) {
@@ -2669,7 +3010,7 @@ const Build = (() => {
     if (!t) { if (!auto) { flashTip(ev, 'place an INBOX on a belt first', false); sfx('bad'); } return false; }
     for (const tag of ['code', 'research', 'general']) convey.enqueueAt(t.x, t.y, { workitemId: 'test-' + (++_testN), tag, preview: 'test ' + tag, test: true });
     note(t.x, t.y, '① OUTSIDE WORK ENTERS HERE (DMs · routines)', '#e8c860');
-    flashTip(ev, auto ? 'LINE COMPLETE — the first crate rides itself. ▸ TEST replays this any time' : 'test work riding — watch the loop', true);
+    flashTip(ev, auto ? 'LINE COMPLETE — the first crate rides itself. ▸ PREVIEW replays this any time' : 'test work riding — watch the loop', true);
     sfx('click');
     return true;
   }
@@ -2677,7 +3018,7 @@ const Build = (() => {
   /* ---------- THE FIRST CRATE NARRATES ITSELF (2026-08-04 onramp) ----------
      The first time this station's floor compiles COMPLETE in REFIT — an INTAKE lane actually
      reaching a BOUND bay (valPlan.reach), which is the moment liveTiles first energize a full
-     route — the narrated ▸ TEST ride auto-runs once, unprompted. That is exactly the teachable
+     route — the narrated ▸ PREVIEW ride auto-runs once, unprompted. That is exactly the teachable
      moment: the user just bound the agent that powered the line on. Once per station, persisted
      in localStorage keyed by the station doc's createdAt (doc.meta is whitelisted-fields
      territory in migrate() — a save-schema field for a UI one-shot is the wrong tool; localStorage
@@ -2735,7 +3076,7 @@ const Build = (() => {
   // render the stage captions: VT323 phosphor, brief rise + fade, world coords (drawn after the boxes)
   function drawTestNotes(now, t) {
     if (!testNotes.length) return;
-    // ride captions register on the activeFlow layer (a running ▸ TEST is a live gesture — it
+    // ride captions register on the activeFlow layer (a running ▸ PREVIEW is a live gesture — it
     // outranks hover/nags, and the arbiter keeps overlapping captions from garbling each other)
     ctx.save();
     ctx.font = VAL_FONT();
@@ -2849,7 +3190,7 @@ const Build = (() => {
     return starter.map(c => {
       const g = grantLabelOf(c) || '?';
       return { id: c.id, done: !!placed[g], cat: c.cat, label: g + ' — ' + c.label,
-        tip: 'place one in your agent’s room — any prop wearing the ' + g + ' badge grants it' };
+        tip: 'Choose this ability when your work needs it. Props with the ' + g + ' badge are alternatives; inspect the selected prop for scope and current access.' };
     });
   }
 
@@ -2860,7 +3201,7 @@ const Build = (() => {
 
   function renderOrders() {
     bumpUi();   // same as renderFinCard: the card in this slot is about to be rebuilt/re-measured
-    if (ordersDismissed()) return ordersHide();
+    if (ordersDismissed() || tool === 'prop') return ordersHide();
     const steps = ordersSteps();
     const done = steps.filter(s => s.done).length;
     // a step that flipped to done SINCE the last render earns the cue — never on the first paint,
@@ -2879,13 +3220,13 @@ const Build = (() => {
     } else if (sig === finSig) return;
     finSig = sig; finComp = null;
     finCardEl.className = 'refit-finline refit-orders';
-    finCardEl.innerHTML = '<div class="fl-head"><span class="fl-title">▸ STARTER GEAR</span>'
-      + '<span class="fl-count">' + done + '/' + steps.length + '</span>'
+    finCardEl.innerHTML = '<div class="fl-head"><span class="fl-title">▸ EQUIPMENT BY PURPOSE</span>'
+      + '<span class="fl-count">' + done + ' on floor</span>'
       + '<button type="button" class="bb sm fl-x" title="dismiss — you know the gear">✕</button></div>'
       + steps.map((s, i) => '<button type="button" class="bb fl-step' + (s.done ? ' done' : '') + '" data-ord="' + s.id + '"'
-        + ' title="' + esc(s.tip) + '">' + (s.done ? '✓ ' : '①②③④⑤'[i] + ' ') + esc(s.label) + '</button>').join('')
+        + ' title="' + esc(s.tip) + '">' + (s.done ? '✓ ' : '+ ') + esc(s.label) + '</button>').join('')
       // the release valve (Andrew): five needs, and permission to ignore the other ~137 props
-      + '<div class="fl-opt">everything else is optional</div>';
+      + '<div class="fl-opt">Choose what your task needs. You can already chat. Matching badges are alternatives, not a checklist.</div>';
     finCardEl.querySelector('.fl-x').onclick = () => {
       try { localStorage.setItem(ORDERS_KEY(), '1'); } catch (e) {}
       sfx('click'); renderOrders();
@@ -2896,9 +3237,9 @@ const Build = (() => {
       b.onclick = () => {
         if (!s) return;
         selectTool('prop');
-        propQuery = ''; propTier = 'functional'; propCat = s.cat; propType = s.id;
+        propQuery = grantLabelOf({id:s.id}); propTier = 'functional'; propCat = s.cat; propType = s.id;
         renderPalette(); setHint();
-        flashTip(null, s.tip, true);
+        flashTip(null, s.label + ' selected', true);
         sfx('click');
       };
     });
@@ -2914,7 +3255,8 @@ const Build = (() => {
     // the card is titled with the LINE'S NAME (the intake's saved label — line naming); unnamed lines
     // keep the generic header. In the sig so a rename repaints without a topology edit.
     const lname = lineNameOf(c);
-    const sig = [c.key, st.crewLeft, st.hasIntake, st.feed.known, st.feed.fed, finSample, lname || '', finSampleRes ? finSampleRes.key + ':' + finSampleRes.stamp : ''].join('|');
+    const overview = workflowReadout(c, valPlan, agentLabelFor);
+    const sig = [c.key, st.crewLeft, st.hasIntake, st.feed.known, st.feed.fed, finSample, lname || '', overview.compact, finSampleRes ? finSampleRes.key + ':' + finSampleRes.stamp : ''].join('|');
     if (!finCardEl) {
       finCardEl = document.createElement('div');
       root.appendChild(finCardEl);
@@ -2925,22 +3267,25 @@ const Build = (() => {
     finCardEl.className = 'refit-finline';
     finSig = sig;
     const crewDone = st.crewLeft === 0;
-    const crewTxt = crewDone ? '✓ DOCKS CREWED' : '① CREW THE DOCKS — ' + st.crewLeft + ' TO GO';
+    const crewTxt = crewDone ? '✓ AGENTS ASSIGNED' : '① ASSIGN STEP AGENTS — ' + st.crewLeft + ' TO GO';
     const feedTxt = !st.hasIntake ? '② FEED IT — TASK THE AGENT, OR WIRE A ROUTINE'
-      : !st.feed.known ? '② FEED THE INBOX — CHECKING THE WIRES…'
-      : st.feed.fed ? '✓ INBOX FED' : '② FEED THE INBOX — CONNECT A CHANNEL OR ROUTINE';
+      : !st.feed.known ? '② CHECKING WHAT STARTS THIS LINE…'
+      : st.feed.fed ? '✓ AUTOMATIC START CONFIGURED' : '② CHOOSE WHAT STARTS THIS LINE';
     // the sample RESULT belongs to the line it rode (finSampleRes.key) — another line's card shows none
     const sr = (finSampleRes && finSampleRes.key === c.key) ? finSampleRes : null;
     const sampleOn = finSample === true && crewDone && !(sr && sr.pending);
-    const sampleTip = finSample !== true ? 'coming online soon' : (crewDone ? 'feed ONE real, clearly-labeled sample job through the whole line' : 'crew the docks first');
+    const sampleTip = finSample !== true ? 'coming online soon' : (crewDone ? 'feed ONE real, clearly-labeled sample job through the whole line' : 'Assign each step an agent first');
     const sampleTxt = (sr && sr.pending) ? (sr.phase === 'post' ? '③ POSTING LINE…' : '③ RUNNING — SAMPLE RIDING THE LINE…') : (sr && sr.view && sr.view.ok) ? '✓ SAMPLE DELIVERED — RUN ANOTHER' : '③ RUN A SAMPLE JOB';
     finCardEl.innerHTML = `
       <div class="fl-head"><span class="fl-title">▸ ${lname ? 'FINISH ' + esc(lname.toUpperCase()) : 'FINISH THE LINE'}</span><button type="button" class="bb sm fl-x" title="dismiss for this line">✕</button></div>
+      <div class="fl-overview">${esc(overview.compact)}</div>
+      <button type="button" class="bb fl-step" data-act="overview">EDIT STEPS & RESULT</button>
       <button type="button" class="bb fl-step${crewDone ? ' done' : ''}" data-act="crew"${crewDone ? ' disabled' : ''}>${esc(crewTxt)}</button>
       <button type="button" class="bb fl-step${st.feedDone ? ' done' : ''}" data-act="feed"${st.feedDone ? ' disabled' : ''}>${esc(feedTxt)}</button>
       <button type="button" class="bb fl-step${sampleOn ? '' : ' off'}${sr && sr.view && sr.view.ok ? ' done' : ''}" data-act="sample" title="${esc(sampleTip)}">${esc(sampleTxt)}</button>
       ${sr && sr.view ? finSampleHTML(sr.view) : ''}`;
     finCardEl.querySelector('.fl-x').onclick = () => { finMark(station, c.key, 'dis'); sfx('click'); renderFinCard(); };
+    finCardEl.querySelector('[data-act="overview"]').onclick = () => { if (c.intakes.length) openFlowCard(c.intakes[0]); else if (c.bays.length) openStepCard(c.bays[0].propId); };
     const bCrew = finCardEl.querySelector('[data-act="crew"]');
     if (bCrew && !crewDone) bCrew.onclick = () => finFocusCrew(c);
     const bFeed = finCardEl.querySelector('[data-act="feed"]');
@@ -3046,6 +3391,10 @@ const Build = (() => {
   }
   function positionFinCard() {
     if (!finCardEl) return;
+    // Routing advice belongs to workflow editing, not the decoration/material inventory.
+    if (tool !== 'belt' && tool !== 'line' && !tutorialCoaching()) {
+      finCardEl.style.display = 'none'; finPosSig = ''; return;
+    }
     if (root && root.querySelector('.refit-firstrun')) { finCardEl.style.display = 'none'; finPosSig = ''; return; }
     const coach = tutorialCoaching() ? coachRect() : null;
     const coachKey = coach ? '|c' + Math.round(coach.left) + ',' + Math.round(coach.top) + ',' + Math.round(coach.right) + ',' + Math.round(coach.bottom) : '';
@@ -3086,8 +3435,12 @@ const Build = (() => {
     const w = cr.width || 232 * uiz, h = cr.height || 118 * uiz;
     // NEVER over the tool dock (the never-blocks-editing law): a left-sidebar dock raises the floor x
     const dock = root.querySelector('.refit-dock');
-    let minX = 8;
-    if (dock) { const d = dock.getBoundingClientRect(); if (d.width < window.innerWidth * 0.6 && d.left < window.innerWidth / 2) minX = Math.max(minX, d.right + 10); }
+    let minX = 8, maxY = window.innerHeight - h - 8;
+    if (dock) {
+      const d = dock.getBoundingClientRect();
+      if (d.width < window.innerWidth * 0.6 && d.left < window.innerWidth / 2) minX = Math.max(minX, d.right + 10);
+      else maxY = Math.min(maxY, d.top - h - 10);
+    }
     const rightX = sx((c.bbox.x2 + 1 + o.tx) * t) + 14;
     const leftX = sx((c.bbox.x1 + o.tx) * t) - w - 14;
     let x, y;
@@ -3095,10 +3448,10 @@ const Build = (() => {
     else if (leftX >= minX) { x = leftX; y = sy((c.bbox.y1 + o.ty) * t) - 4; }                            // beside, to the left
     else { x = sx((c.bbox.x2 + 1 + o.tx) * t) - w; y = sy((c.bbox.y2 + 1 + o.ty) * t) + 12; }             // no side room — under the line
     x = Math.max(minX, Math.min(x, window.innerWidth - w - 8));
-    y = Math.max(56, Math.min(y, window.innerHeight - h - 8));
+    y = Math.max(56, Math.min(y, maxY));
     // a coach bubble over the same spot: stack the checklist UNDER it (never hide it, never cover it)
     if (coach && x < coach.right && x + w > coach.left && y < coach.bottom && y + h > coach.top) {
-      y = Math.min(coach.bottom + 10, window.innerHeight - h - 8);
+      y = Math.min(coach.bottom + 10, maxY);
     }
     finCardEl.style.left = Math.round(x / uiz) + 'px';
     finCardEl.style.top = Math.round(y / uiz) + 'px';
@@ -3157,15 +3510,16 @@ const Build = (() => {
     g.innerHTML = `
       <div class="refit-guide-card">
         <h3>▮ ${esc((rm.name || roomId).toUpperCase())}</h3>
+        <p class="step-fact">Give this room a name, change its floor, or move it.</p><details class="refit-room-help"><summary>How room equipment works</summary><p class="step-fact">Workflow agents use equipment in their desk’s room, or their bay’s room if they have no desk. Agents sharing a room share its equipment; each needs its own desk.</p></details>
         <div class="refit-sec">THE ROOM</div>
         <div class="step-fact"><b>${esc(kd.label || rm.kind)}</b>${isSpawn ? ' · the spawn room' : ''}</div>
         <div class="step-fact">${esc(shape)} · <b>${tiles}</b> tiles of deck</div>
         <div class="step-fact">deck: <b>${esc(matDef.label || matId || '—')}</b> in <b>${esc(hueDef.label || rm.floorStyle || '—')}</b></div>
         <div class="refit-sec">NAME</div>
-        <input id="room-name" class="refit-input" type="text" maxlength="40" placeholder="name this room" value="${esc(rm.name || '')}" />
-        <div class="refit-note">saved on Enter — it labels the room on the floor</div>
+        <input id="room-name" class="refit-input" aria-label="Room name" type="text" maxlength="40" placeholder="name this room" value="${esc(rm.name || '')}" />
+        <div class="refit-note">Saved when you press Enter or close this card. The name appears on the floor.</div>
         <div class="refit-actions">
-          <button type="button" class="btn-sm" id="room-deck">▧ RE-DECK</button>
+          <button type="button" class="btn-sm" id="room-deck">▧ CHANGE FLOOR</button>
           <button type="button" class="btn-sm" id="room-move">✥ MOVE</button>
           <!-- NOT an emoji bin here: a colour-emoji glyph is a different font at a different weight
                beside VT323 (the symbol-glyph law). ⌫ is the same mark the armed state uses. -->
@@ -3283,8 +3637,7 @@ const Build = (() => {
     const dock = root.querySelector('.refit-dock');
     if (dock) {
       const d = dock.getBoundingClientRect();
-      if (d.width < c.width * 0.6) out.l = Math.max(0, d.right - c.left) * sx;  // left sidebar (narrow column)
-      else out.b = Math.max(0, c.bottom - d.top) * sy;                          // bottom sheet (spans the width)
+      if (!dock.classList.contains('is-collapsed')) out.l = Math.max(0, d.right - c.left) * sx;
     }
     return out;
   }
@@ -3535,6 +3888,8 @@ const Build = (() => {
     if (tool !== 'prop') { sfx('bad'); flashTip(ev, 'hover a placed prop to turn it, or pick the PROP tool (6)'); return; }
     if (!canTurn(propType)) { sfx('bad'); flashTip(ev, propLabel(propType) + ' only faces one way — its turned art is not drawn'); return; }
     propRot = nextFace(propType, propRot, dir) & 3;
+    renderPropPreview();
+    renderEquipmentInfo();
     const b = propBox(propType, propRot);
     sfx('click'); flashTip(ev, 'facing ' + FACE_WORD[propRot] + ' · ' + b.w + '×' + b.h, true); setHint();
   }
@@ -3551,6 +3906,8 @@ const Build = (() => {
     if (tool !== 'prop') { sfx('bad'); flashTip(ev, 'hover a placed prop to flip it, or pick the PROP tool (6)'); return; }
     if (!canFlip(propType)) { sfx('bad'); flashTip(ev, propLabel(propType) + ' cannot be flipped — its light is painted in, not derived'); return; }
     propMir = propMir ? 0 : 1;
+    renderPropPreview();
+    renderEquipmentInfo();
     sfx('click'); flashTip(ev, propMir ? 'flipped' : 'unflipped', true); setHint();
   }
   // open the right editor for a logistics prop that carries config (BAY = agent, FILTER/MERGER = routing, AIRLOCK = seal)
@@ -3572,6 +3929,7 @@ const Build = (() => {
     if (t === 'intake' || t === 'outbox' || t === 'merger' || t === 'splitter' || t === 'joiner' || t === 'loop') return openFlowCard(p.id);
     // no config surface: answer the click honestly instead of doing nothing
     const sp = propSpec(t);
+    renderEquipmentInfo(t, p);
     flashTip(ev, ((sp.label || t) + '').toUpperCase() + ' — MOVE (4) relocates · DELETE (5) removes', true);
   }
   const openPropEditor = (id, t, ev) => { const p = station && station.propById(id); if (p) onInspect(p, ev); };
@@ -3626,7 +3984,8 @@ const Build = (() => {
       // ESC / right-click still drops the tool; rooms and blueprints keep their one-shot flow.
       if (isEditableProp(propType) && res.id) { openPropEditor(res.id, propType, ev); return; }   // configure the freshly-placed prop
     }
-    feedback(res, ev, grant ? ('EQUIPPED · grants ' + grant) : ('placed ' + propType));
+    if (res && res.ok) renderEquipmentInfo(propType);
+    feedback(res, ev, grant ? ('PLACED · ' + grant + ' equipment') : ('placed ' + propType));
   }
   function commitBeltRun(d, ev) {
     // CLICK-ON-MACHINE WINS: connectable machines were consumed by the connect flow in onDown; a
@@ -3639,7 +3998,7 @@ const Build = (() => {
     const res = station.placeBeltRun(d.start, d.cur);
     if (res && res.ok && res.count) {
       pushFlash([beltRunBox(d.start, d.cur)], false);
-      if (typeof Tutorial !== 'undefined' && Tutorial.onBeltPlaced) Tutorial.onBeltPlaced();   // first-touch coachmark: belts + ▸ TEST
+      if (typeof Tutorial !== 'undefined' && Tutorial.onBeltPlaced) Tutorial.onBeltPlaced();   // first-touch coachmark: belts + ▸ PREVIEW
     }
     feedback(res, ev, res && res.dir ? ('belt → ' + res.dir) : 'belt');
   }
@@ -3839,7 +4198,7 @@ const Build = (() => {
     const bits = [rooms + (rooms === 1 ? ' ROOM' : ' ROOMS')];
     if (halls) bits.push(halls + (halls === 1 ? ' HALL' : ' HALLS'));
     bits.push(tiles + ' TILES');
-    if (machines) bits.push(machines + (machines === 1 ? ' MACHINE' : ' MACHINES'));
+    if (machines) bits.push(machines + (machines === 1 ? ' OBJECT' : ' OBJECTS'));
     /* THE STATION'S OWN NAME FOR ITS SIZE. A pure LABEL on a number already shown — no gauge, no
        gate, nothing unlocks at a threshold (sandbox law); crossing one is simply the floor earning
        a bigger word, which is the whole point of building. Announced once, when it happens. */
@@ -3873,6 +4232,7 @@ const Build = (() => {
        LINES and yanked the camera out from under the card, and Ctrl+Z undid the very stamp that created
        the bay being edited. Only ESC crosses a card — and it closes THAT card (below), never the floor. */
     if (modal && ev.key !== 'Escape') return;
+    if (ev.key === ' ' && a && (a.tagName === 'BUTTON' || a.tagName === 'SUMMARY')) return;
     if (ev.key === ' ') { ev.preventDefault(); spaceHeld = true; setCursor(); return; }
     if (ev.key === 'Escape') {
       // close the TOPMOST card through ITS OWN close path (which saves what that card saves — an unsaved
@@ -3880,6 +4240,10 @@ const Build = (() => {
       // card's own registered path is what does it: `.refit-guide` is shared by eight cards, so matching
       // on it here is what used to mark the guide seen from a step editor and throw the brief away.
       if (modal) { cardClose(modal); return; }
+      const categoryMenu = root.querySelector('.refit-category-menu[open]');
+      if (categoryMenu) { categoryMenu.open = false; categoryMenu.querySelector('summary').focus(); return; }
+      const details = root.querySelector('.refit-propworkspace.show-details');
+      if (details) { const toggle = details.querySelector('.refit-details-toggle'); toggle.click(); toggle.focus(); return; }
       if (drag) { releaseDrag(); hideTip(); setCursor(); return; }       // cancel an in-progress edit first
       if (connectFrom) { connectFrom = null; hideTip(); return; }        // then a half-made connection
       if (dupe) { dupe = null; hideTip(); setHint(); return; }           // then the armed copy
@@ -3892,6 +4256,7 @@ const Build = (() => {
       sfx(r.ok ? 'click' : 'bad'); return;
     }
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'y' || ev.key === 'Y')) { ev.preventDefault(); sfx(station.redo().ok ? 'click' : 'bad'); return; }
+    if (ev.key === '/') { ev.preventDefault(); if (tool !== 'prop') selectTool('prop'); toggleKit(false); root.querySelector('#refit-propsearch-input')?.focus(); return; }
     if (ev.key === 'f' || ev.key === 'F') { fitCamera(); return; }
     // R turns · shift+R turns back · M flips. Acts on the prop UNDER THE CURSOR when there is one
     // (so a furnished room can be re-aimed without tearing anything down), otherwise on the pending
@@ -4049,12 +4414,25 @@ const Build = (() => {
     return { dx: dx + (s.x1 - moved.x1), dy: dy + (s.y1 - moved.y1) };
   }
 
+  let propHoverMemo = null;
   function ghostInfo() {
     if (!drag) {
       // DUPE armed: the copy ghosts under the cursor with no drag — every click stamps
       if (tool === 'dupe' && dupe && hoverTile) return dupeGhost(hoverTile.tx, hoverTile.ty);
       // LINES armed: the whole blueprint ghosts under the cursor — click stamps, red stays red
       if (tool === 'line' && hoverTile) return lineGhost(hoverTile.tx, hoverTile.ty);
+      // Show a prop's occupied footprint before the click. Validation is stable while the
+      // pointer, orientation and station stay put; avoid a model walk on every paint frame.
+      if (tool === 'prop' && hoverTile) {
+        const { tx, ty } = hoverTile, facing = propFacing(propType);
+        const key = [geoVer, propType, facing, tx, ty].join('|');
+        if (!propHoverMemo || propHoverMemo.key !== key) {
+          const s = propBox(propType, facing);
+          const rect = { x1: tx, y1: ty, x2: tx + s.w - 1, y2: ty + s.h - 1 };
+          propHoverMemo = { key, ghost: { rects: [rect], v: station.canPlaceProp(propType, tx, ty, s.w, s.h), kind: 'prop', stamp: true } };
+        }
+        return propHoverMemo.ghost;
+      }
       // ROOM / HALLWAY armed: the footprint a CLICK would stamp, previewed under the cursor and
       // validated live — so "what happens if I press here" is answered before you press. A drag
       // from the same tile takes over the moment you move (drag.mode 'draw' below).
@@ -4249,6 +4627,9 @@ const Build = (() => {
     ctx.setTransform(zoom, 0, 0, zoom, panX, panY);
     ctx.imageSmoothingEnabled = false;
     const ox = cache.origin.tx * t, oy = cache.origin.ty * t;
+    if (sceneRenderer) sceneRenderer.begin({ geo: cacheGeo, cache, now, scale: zoom,
+      panX: panX + ox * zoom, panY: panY + oy * zoom, width: cv.width, height: cv.height,
+      reducedMotion: typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches });
     /* the ground, in world space under the bake — REFIT blits the station at (ox,oy), so the
        clearing must be placed there too, not at the origin like the live world.
 
@@ -4273,14 +4654,28 @@ const Build = (() => {
     drawLayer('conveyor', () => drawConveyor(now, t));   // belts (floor) → props → boxes ride on top
     drawLayer('props', () => drawProps(now));
     drawLayer('boxes', () => drawConveyorBoxes(now, t));
+    let nextLight = false;
     drawLayer('light', () => {
-      if (StationBake.drawLight) StationBake.drawLight(ctx, cache, ox, oy, drawVisibleRect);
-      else ctx.drawImage(cache.lightCv, ox, oy);
+      if (sceneRenderer) {
+        ctx.save(); ctx.translate(ox, oy);
+        try { nextLight = sceneRenderer.drawLight(ctx, framePropLights, { ambient: StationBake.LIGHT.ambient, emission: .9 }); }
+        finally { ctx.restore(); }
+      }
+      if (!nextLight) {
+        if (StationBake.drawLight) StationBake.drawLight(ctx, cache, ox, oy, drawVisibleRect);
+        else ctx.drawImage(cache.lightCv, ox, oy);
+      }
     });
-    drawLayer('glows', () => drawGlows(now));
+    if (!nextLight) drawLayer('glows', () => drawGlows(now));
     drawLayer('flashes', () => drawFlashes(now, t));
     drawLayer('validation', () => drawRoutingValidation(t, now));   // plain-words callouts on any broken piece, IN build mode (cost-safety + guidance)
     drawLayer('beltEndpoints', () => drawBeltEndpointGlow(t, now)); // BELT tool armed → INTAKE glows FROM, BAY/OUTBOX glow TO (what connects to what)
+    drawLayer('bayNames', () => {
+      if (typeof PropSprites !== 'undefined' && PropSprites.drawBayNames) {
+        PropSprites.setCtx(ctx);
+        PropSprites.drawBayNames(frameBayLabels, zoom, window.devicePixelRatio || 1);
+      }
+    });
     // the candidate field is an INSTRUMENT — above the light with the crosshair, or the deck swallows it
     drawLayer('lineField', () => drawLineField(t));
     drawLayer('crosshair', () => drawCrosshair(t));   // the aim instrument — ABOVE the light layer, or the deck swallows it
@@ -4296,6 +4691,7 @@ const Build = (() => {
     if (tool === 'prop' && propThumbs.length && now - lastThumbTs >= 40) { paintThumbs(now); lastThumbTs = now; }
 
     frameFailures = 0;
+    if (sceneRenderer) sceneRenderer.finish();
     if (root) {
       root.dataset.renderState = 'ready';
       root.dataset.renderFailures = '0';
@@ -4345,7 +4741,7 @@ const Build = (() => {
     const hasApron = mx1 > mx0 && my1 > my0;
     if (minorK > 0.02 && hasApron) {
       ctx.lineWidth = lw;
-      ctx.strokeStyle = 'rgba(120,200,255,' + (minorK * (armed ? 0.15 : 0.075)).toFixed(3) + ')';
+      ctx.strokeStyle = 'rgba(120,200,255,' + (minorK * (armed ? 0.15 : 0.04)).toFixed(3) + ')';
       ctx.beginPath();
       for (let gx = mx0; gx <= mx1; gx++) { ctx.moveTo(gx * t, my0 * t); ctx.lineTo(gx * t, my1 * t); }
       for (let gy = my0; gy <= my1; gy++) { ctx.moveTo(mx0 * t, gy * t); ctx.lineTo(mx1 * t, gy * t); }
@@ -4358,13 +4754,13 @@ const Build = (() => {
     for (let gx = Math.ceil(tx0 / GRID_MAJOR) * GRID_MAJOR; gx <= tx1; gx += GRID_MAJOR) majX.push(gx);
     for (let gy = Math.ceil(ty0 / GRID_MAJOR) * GRID_MAJOR; gy <= ty1; gy += GRID_MAJOR) majY.push(gy);
     ctx.lineWidth = lw;
-    ctx.strokeStyle = 'rgba(130,205,255,' + (armed ? 0.10 : 0.06) + ')';
+    ctx.strokeStyle = 'rgba(130,205,255,' + (armed ? 0.10 : 0.04) + ')';
     ctx.beginPath();
     for (const gx of majX) { ctx.moveTo(gx * t, y0); ctx.lineTo(gx * t, y1); }
     for (const gy of majY) { ctx.moveTo(x0, gy * t); ctx.lineTo(x1, gy * t); }
     ctx.stroke();
     if (hasApron) {
-      ctx.strokeStyle = 'rgba(160,220,255,' + (armed ? 0.17 : 0.10) + ')';
+      ctx.strokeStyle = 'rgba(160,220,255,' + (armed ? 0.17 : 0.065) + ')';
       ctx.beginPath();
       for (const gx of majX) { if (gx < mx0 || gx > mx1) continue; ctx.moveTo(gx * t, my0 * t); ctx.lineTo(gx * t, my1 * t); }
       for (const gy of majY) { if (gy < my0 || gy > my1) continue; ctx.moveTo(mx0 * t, gy * t); ctx.lineTo(mx1 * t, gy * t); }
@@ -4374,7 +4770,7 @@ const Build = (() => {
     // ---- DECK: per-tile cells over the real footprint — the brightest reading, floor that exists ----
     if (cacheGeo && (tx1 - tx0) * (ty1 - ty0) < 6000) {
       const ox = cacheGeo.origin.tx, oy = cacheGeo.origin.ty, zg = cacheGeo.zoneGrid, idx = cacheGeo.idx, C = cacheGeo.COLS, R = cacheGeo.ROWS;
-      ctx.strokeStyle = 'rgba(140,210,255,' + (minorK * (armed ? 0.20 : 0.13) + 0.03).toFixed(3) + ')';
+      ctx.strokeStyle = 'rgba(140,210,255,' + (minorK * (armed ? 0.20 : 0.055) + 0.03).toFixed(3) + ')';
       ctx.beginPath();
       for (let gy = ty0; gy <= ty1; gy++) for (let gx = tx0; gx <= tx1; gx++) {
         const lx = gx - ox, ly = gy - oy;
@@ -4421,17 +4817,29 @@ const Build = (() => {
     ctx.stroke();
   }
 
+  const _fixtureGlow = new WeakMap();
   function drawGlows(now) {
     if (!cache.flickers) return;
     const t = T(), ox = cache.origin.tx * t, oy = cache.origin.ty * t;
+    if (cache.interiorPath) {
+      ctx.save(); ctx.translate(ox, oy); ctx.clip(cache.interiorPath); ctx.translate(-ox, -oy);
+    }
     ctx.globalCompositeOperation = 'lighter';
     for (const f of cache.flickers) {
-      const a = Math.max(0, 0.08 * (0.55 + 0.45 * Math.sin(now / 210 + f.x) * Math.sin(now / 83 + f.y)));
-      const g = ctx.createRadialGradient(ox + f.x, oy + f.y, 1, ox + f.x, oy + f.y, f.r * 0.7);
-      g.addColorStop(0, 'rgba(238,218,184,' + a + ')'); g.addColorStop(1, 'rgba(238,218,184,0)');
+      let entry = _fixtureGlow.get(f);
+      if (!entry || entry.ox !== ox || entry.oy !== oy) {
+        const g = ctx.createRadialGradient(ox + f.x, oy + f.y, 1, ox + f.x, oy + f.y, f.r * 0.7);
+        const rgb = f.rgb || '238,218,184';
+        g.addColorStop(0, 'rgba(' + rgb + ',1)'); g.addColorStop(1, 'rgba(' + rgb + ',0)');
+        entry = { g, ox, oy }; _fixtureGlow.set(f, entry);
+      }
+      const g = entry.g;
+      ctx.globalAlpha = 0.13 * 0.55;
       ctx.fillStyle = g; ctx.fillRect(ox + f.x - f.r * 0.7, oy + f.y - f.r * 0.7, f.r * 1.4, f.r * 1.4);
     }
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    if (cache.interiorPath) ctx.restore();
   }
 
   /* ---------- PLACEMENT JUICE (2026-08-07 round 3) ----------
@@ -4494,7 +4902,10 @@ const Build = (() => {
 
   // placeable props — drawn in WORLD tile coords (camera maps world*t, the bake is origin-shifted
   // to match). Lit (work=true) so the editor previews screens alive; y-sorted for clean overlap.
+  let frameBayLabels = [], framePropLights = [];
   function drawProps(now) {
+    frameBayLabels = [];
+    framePropLights = [];
     if (typeof PropSprites === 'undefined') return;
     const list = station.props();
     if (!list.length) return;
@@ -4522,14 +4933,21 @@ const Build = (() => {
     const vx1 = (cv.width - panX) / zt + PROP_CULL_PAD, vy1 = (cv.height - panY) / zt + PROP_CULL_PAD;
     let bayNames = null;   // aid -> name, resolved once per paint (the roster read is a callback into app.js)
     for (const p of order) {
-      if (p.x > vx1 || p.y > vy1 || p.x + (p.w || 1) - 1 < vx0 || p.y + (p.h || 1) - 1 < vy0) continue;
       const m = mountMap.get(p.id);
       let dp = m ? Object.assign({}, p, { mount: m }) : p;
+      if (PropSprites.lightOf && cacheGeo) {
+        // Light can reach into the viewport even when the emitting sprite is culled.
+        const l = PropSprites.lightOf(dp, true, true), o = cacheGeo.origin;
+        if (l) framePropLights.push(Object.assign({}, l, { x: l.x - o.tx * tp, y: l.y - o.ty * tp,
+          originX: (p.x + (p.w || 1) / 2 - o.tx) * tp, originY: (p.y + (p.h || 1) / 2 - o.ty) * tp }));
+      }
+      if (p.x > vx1 || p.y > vy1 || p.x + (p.w || 1) - 1 < vx0 || p.y + (p.h || 1) - 1 < vy0) continue;
       // the editor draws the same gantry plate the live world does: a bound bay wears its agent's NAME
       if (p.t === 'bay' && p.agentId) {
         if (!bayNames) { bayNames = new Map(); for (const a of ((opts && typeof opts.agents === 'function' && opts.agents()) || [])) bayNames.set(a.id, a.name); }
         const nm = bayNames.get(p.agentId);
         if (nm) dp = Object.assign(dp === p ? Object.assign({}, p) : dp, { dockName: nm });
+        frameBayLabels.push(dp);
       }
       PropSprites.draw(dp, true);
     }
@@ -4589,7 +5007,7 @@ const Build = (() => {
     convey.tick(dt, now, belts, jmap, testStops());   // stops: preview crates are consumed at their dock, like real ones
     /* GHOST PROJECTION (Phase 3): stands down while anything coach-like is up (tutorial, the
        first-run card, an ARMED/pending first ride — the two narrations must never fight) and the
-       INSTANT any real preview crate rides (▸ TEST / the first ride own the belt). Same belts,
+       INSTANT any real preview crate rides (▸ PREVIEW / the first ride own the belt). Same belts,
        same junction decisions, same frame as the real sim; its own dedicated engine + stops. */
     if (ghost) {
       const blocked = tutorialCoaching() || ridePending || !!rideTimer
@@ -5008,6 +5426,96 @@ const Build = (() => {
     ctx.restore();
   }
 
+  // REFIT-FOOTPRINT-BEGIN
+  // Project the same edit the gesture will commit, on an isolated document. This
+  // keeps sealed rooms and moved airlocks honest without touching save/undo state.
+  function projectFootprint(model, doc, candidate) {
+    const preview = model.deserialize(doc);
+    const res = candidate.moveId
+      ? preview.moveRoom(candidate.moveId, candidate.dx, candidate.dy)
+      : preview.addRoom({ kind: candidate.kind, rects: candidate.rects });
+    if (!res.ok) return { ok: false, msg: res.msg, runs: [], openings: [] };
+    const id = candidate.moveId || res.id, room = preview.roomById(id), geo = preview.projectGeometry();
+    const origin = geo.origin || { tx: 0, ty: 0 }, cells = [], seen = new Set();
+    const at = (x, y) => {
+      const lx = x - origin.tx, ly = y - origin.ty;
+      return lx < 0 || ly < 0 || lx >= geo.COLS || ly >= geo.ROWS ? null : geo.zoneGrid[geo.idx(lx, ly)];
+    };
+    const edge = (x, y, side, dx, dy) => {
+      const neighbor = at(x + dx, y + dy);
+      if (neighbor === id) return; // adjacent rectangles form one footprint
+      const key = x + ',' + y + ',' + side;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const lx = x - origin.tx, ly = y - origin.ty;
+      const open = neighbor != null && geo.canStep(lx, ly, lx + dx, ly + dy);
+      cells.push({ side, x: x + (side === 'e' ? 1 : 0), y: y + (side === 's' ? 1 : 0), length: 1, open, neighbor });
+    };
+    for (const r of room.rects) {
+      for (let x = r.x1; x <= r.x2; x++) { edge(x, r.y1, 'n', 0, -1); edge(x, r.y2, 's', 0, 1); }
+      for (let y = r.y1; y <= r.y2; y++) { edge(r.x1, y, 'w', -1, 0); edge(r.x2, y, 'e', 1, 0); }
+    }
+    const horizontal = e => e.side === 'n' || e.side === 's';
+    cells.sort((a, b) => a.side.localeCompare(b.side) || (horizontal(a) ? a.y - b.y || a.x - b.x : a.x - b.x || a.y - b.y));
+    const runs = [];
+    for (const e of cells) {
+      const p = runs[runs.length - 1], h = horizontal(e);
+      // One clear architectural opening may border several logical rooms.
+      if (p && p.side === e.side && p.open === e.open && (e.open || p.neighbor === e.neighbor) &&
+          (h ? p.y === e.y && p.x + p.length === e.x : p.x === e.x && p.y + p.length === e.y)) {
+        p.length++;
+        if (e.neighbor != null && !p.neighbors.includes(e.neighbor)) p.neighbors.push(e.neighbor);
+      } else runs.push({ ...e, neighbors: e.neighbor == null ? [] : [e.neighbor] });
+    }
+    return { ok: true, rects: room.rects, runs, openings: runs.filter(e => e.open), sealed: runs.some(e => e.neighbor != null && !e.open) };
+  }
+  // REFIT-FOOTPRINT-END
+
+  let footprintMemo = null;
+  function structureGhost(g) {
+    if (!g || !g.v || !g.v.ok || typeof WorldModel === 'undefined') return null;
+    const move = g.move && drag && drag.mode === 'move';
+    if (!move && g.kind !== 'room' && g.kind !== 'hall') return null;
+    const candidate = { rects: g.rects, kind: g.kind === 'hall' ? 'corridor' : kind,
+      moveId: move ? drag.roomId : null, dx: g.dx || 0, dy: g.dy || 0 };
+    const key = geoVer + '|' + JSON.stringify(candidate);
+    if (!footprintMemo || footprintMemo.key !== key) {
+      footprintMemo = { key, plan: projectFootprint(WorldModel, station.doc(), candidate) };
+    }
+    return footprintMemo.plan;
+  }
+
+  function drawFootprint(t, plan, fill, line) {
+    ctx.save();
+    ctx.fillStyle = fill;
+    for (const r of plan.rects) ctx.fillRect(r.x1 * t, r.y1 * t, (r.x2 - r.x1 + 1) * t, (r.y2 - r.y1 + 1) * t);
+    ctx.strokeStyle = line; ctx.lineWidth = 2 / zoom;
+    ctx.beginPath();
+    for (const e of plan.runs) {
+      if (e.open) continue;
+      const h = e.side === 'n' || e.side === 's', x = e.x * t, y = e.y * t;
+      ctx.moveTo(x, y); ctx.lineTo(x + (h ? e.length * t : 0), y + (h ? 0 : e.length * t));
+    }
+    ctx.stroke();
+    // A pair of small jamb marks shows where the wall will open. Keep the span
+    // clear: an unbroken rectangle border falsely reads as a wall across a join.
+    for (const e of plan.openings) {
+      const h = e.side === 'n' || e.side === 's', x = e.x * t, y = e.y * t, len = e.length * t;
+      const depth = Math.min(t * .42, 7 / zoom), arm = Math.min(len * .2, 7 / zoom);
+      ctx.fillStyle = 'rgba(120,255,190,.13)';
+      ctx.fillRect(x - (h ? 0 : depth), y - (h ? depth : 0), h ? len : depth * 2, h ? depth * 2 : len);
+      ctx.strokeStyle = 'rgba(180,255,215,.92)'; ctx.lineWidth = 2 / zoom;
+      ctx.beginPath();
+      if (h) {
+        for (const [a, sign] of [[x, 1], [x + len, -1]]) { ctx.moveTo(a + arm * sign, y - depth); ctx.lineTo(a, y - depth); ctx.lineTo(a, y + depth); ctx.lineTo(a + arm * sign, y + depth); }
+      } else {
+        for (const [a, sign] of [[y, 1], [y + len, -1]]) { ctx.moveTo(x - depth, a + arm * sign); ctx.lineTo(x - depth, a); ctx.lineTo(x + depth, a); ctx.lineTo(x + depth, a + arm * sign); }
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   function drawGhost(t, now) {
     // paint brush: tint the crossed tiles with the chosen deck colour
     if (drag && drag.mode === 'paint' && drag.moved) {
@@ -5032,7 +5540,8 @@ const Build = (() => {
     }
     const g = ghostInfo();
     if (!g) return;
-    const ok = g.v && g.v.ok;
+    const footprint = structureGhost(g);
+    const ok = g.v && g.v.ok && (!footprint || footprint.ok);
     // a HOVER PREVIEW is quieter than a live gesture — it is showing you an option, not a commitment,
     // and at full strength it read as "you are already dragging" every time the pointer crossed the floor
     // ...and an INVALID preview is quieter still: with ROOM armed, every pass of the pointer over
@@ -5041,13 +5550,16 @@ const Build = (() => {
     const k = g.stamp ? (ok ? 0.6 : 0.3) : 1;
     const fill = ok ? 'rgba(80,255,140,' + (0.16 * k).toFixed(3) + ')' : 'rgba(255,90,80,' + (0.18 * k).toFixed(3) + ')';
     const line = ok ? 'rgba(120,255,170,' + (0.95 * k).toFixed(2) + ')' : 'rgba(255,120,110,' + (0.95 * k).toFixed(2) + ')';
-    ctx.lineWidth = 1.5 / zoom;
-    for (const r of g.rects) {
-      const X = r.x1 * t, Y = r.y1 * t, Wd = (r.x2 - r.x1 + 1) * t, Hd = (r.y2 - r.y1 + 1) * t;
-      ctx.fillStyle = fill; ctx.fillRect(X, Y, Wd, Hd);
-      ctx.strokeStyle = line; ctx.strokeRect(X + 0.5 / zoom, Y + 0.5 / zoom, Wd - 1 / zoom, Hd - 1 / zoom);
+    if (footprint && footprint.ok) drawFootprint(t, footprint, fill, line);
+    else {
+      ctx.lineWidth = 1.5 / zoom;
+      for (const r of g.rects) {
+        const X = r.x1 * t, Y = r.y1 * t, Wd = (r.x2 - r.x1 + 1) * t, Hd = (r.y2 - r.y1 + 1) * t;
+        ctx.fillStyle = fill; ctx.fillRect(X, Y, Wd, Hd);
+        ctx.strokeStyle = line; ctx.strokeRect(X + 0.5 / zoom, Y + 0.5 / zoom, Wd - 1 / zoom, Hd - 1 / zoom);
+      }
+      for (const r of g.rects) ghostReticle(t, r, line);
     }
-    for (const r of g.rects) ghostReticle(t, r, line);
     // belt: draw flow arrows along the run so the direction reads at a glance
     if (g.belt) {
       const V = { E: [1, 0], W: [-1, 0], S: [0, 1], N: [0, -1] }[g.dir];
@@ -5071,9 +5583,13 @@ const Build = (() => {
     const lines = [dims];
     // a sized footprint also gets its area — "how much floor is this?" is the other question a drag asks
     if (!g.belt && !g.move && g.kind !== 'line' && w * h > 1) lines[0] = dims + '   ' + (w * h) + ' TILES';
-    if (!ok) lines.push(((g.v && g.v.msg) || 'blocked').toUpperCase());
+    if (!ok) lines.push(((footprint && footprint.msg) || (g.v && g.v.msg) || 'blocked').toUpperCase());
     // the hover preview teaches BOTH gestures: this size on a click, any size on a drag
-    else if (g.stamp) lines.push('CLICK TO PLACE · DRAG TO SIZE');
+    else if (g.stamp) lines.push(g.kind === 'prop' ? 'CLICK TO PLACE' : 'CLICK TO PLACE · DRAG TO SIZE');
+    if (footprint && footprint.ok) {
+      const n = footprint.openings.length;
+      lines.push(n ? n + (n === 1 ? ' OPEN CONNECTION' : ' OPEN CONNECTIONS') : footprint.sealed ? 'SEALED EDGE' : 'SEPARATE SECTION');
+    }
     ghostBadge(t, lines, ok, r0);
     // NOTE: deliberately does NOT hideTip() — flashTip's transient confirmations ("room placed")
     // fire while a ghost is still on screen, and hiding here every frame would eat them instantly.
@@ -5240,6 +5756,7 @@ const Build = (() => {
     },
     // the ghost's CURRENT rect — so a proof can assert the ghost and the commit agree, not just one
     ghostRects: () => { const g = ghostInfo(); return g && g.rects ? g.rects.map(r => ({ ...r })) : null; },
+    footprint: () => structureGhost(ghostInfo()),
     // finish-the-line card readout for CDP proof scripts: the EXACT DOM state the card renders
     finCard: () => (finCardEl ? {
       key: finComp && finComp.key,
@@ -5253,7 +5770,7 @@ const Build = (() => {
     } : null),
     finRegistry: () => finRead(station),
     /* TEST-RIDE readouts for CDP proof scripts (conveyor-audit 2026-08-10). rideMouth runs the
-       REAL reach-aware picker (null agentId = the lineless ▸ TEST pick, WORLD tiles); ride()
+       REAL reach-aware picker (null agentId = the lineless ▸ PREVIEW pick, WORLD tiles); ride()
        reports the one-shot arming + the live preview crates and captions — where the ride
        actually entered, straight from the engine, never a screenshot of the animated canvas. */
     rideMouth: (agentId) => rideMouthFor(agentId || null),

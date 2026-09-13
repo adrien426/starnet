@@ -104,6 +104,11 @@ jobs:
         shell: bash
         run: bash scripts/hydrate-sharp-macos-x64.sh
 
+      - name: Stage StarNet Google sign-in registration
+        env:
+          STARNET_GOOGLE_DESKTOP_CLIENT_JSON: ${{ secrets.STARNET_GOOGLE_DESKTOP_CLIENT_JSON }}
+        run: node scripts/stage-google-client.mjs --optional
+
       - name: Stage bundled Node sidecar runtime
         run: |
           node scripts/prepare-node.mjs ${{ matrix.target }}
@@ -182,9 +187,9 @@ jobs:
           fi
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             echo "::notice::no updater signing key in secrets — building installers without updater artifacts"
-            npm run tauri -- build --bundles ${{ matrix.bundles }} ${RUST_TARGET:+--target $RUST_TARGET} --config '{"bundle":{"createUpdaterArtifacts":false}}' ${SIGN_CFG:+--config "$SIGN_CFG"}
+            npm run tauri -- build --verbose --bundles ${{ matrix.bundles }} ${RUST_TARGET:+--target $RUST_TARGET} --config '{"bundle":{"createUpdaterArtifacts":false}}' ${SIGN_CFG:+--config "$SIGN_CFG"}
           else
-            npm run tauri -- build --bundles ${{ matrix.bundles }} ${RUST_TARGET:+--target $RUST_TARGET} ${SIGN_CFG:+--config "$SIGN_CFG"}
+            npm run tauri -- build --verbose --bundles ${{ matrix.bundles }} ${RUST_TARGET:+--target $RUST_TARGET} ${SIGN_CFG:+--config "$SIGN_CFG"}
           fi
 
       - name: Submit macOS DMG for asynchronous notarization

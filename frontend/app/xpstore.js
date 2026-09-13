@@ -49,9 +49,8 @@ const XpStore = (() => {
 
   // the always-on STATION level chip in the top bar — the colony's headline number.
   function pushTopbar() {
-    if (typeof Xp === 'undefined' || !station) return;
-    const el = document.getElementById('gt-station');
-    if (el) el.textContent = 'Lv ' + Xp.compute(station).level;
+    // Agent feedback remains crew XP. Only the Journey read-model writes Commander level.
+    try { if (typeof Topbar !== 'undefined' && Topbar._paintXp) Topbar._paintXp(); } catch (_) {}
   }
 
   // The canvas HUD and top-bar chip have direct setters, but the left crew manifest renders its "Lv N" text
@@ -80,8 +79,7 @@ const XpStore = (() => {
   }
   function celebrateStation(level) {
     pushTopbar();
-    const chip = document.getElementById('tb-station');   // gold pulse on the top-bar STATION chip
-    if (chip) { chip.classList.remove('lvup'); void chip.offsetWidth; chip.classList.add('lvup'); }
+    // The Commander chip must not celebrate an agent-feedback level.
     // NO StationUI.notify (notification diet): the gold chip pulse + the new level number ARE the announcement.
   }
   // a milestone's short trophy title for the broadcast. Read from
@@ -295,9 +293,22 @@ const XpStore = (() => {
       res = await post('/api/growth/ratings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({}, rating || {}, { epoch: growthEpoch() }))
       });
-      body = res && res.ok ? await res.json() : null;
+      body = res ? await res.json() : null;
     } catch (_) { body = null; }
-    if (!body || !body.ok || !body.rating || !Array.isArray(body.rating.entries)) return { ok: false, error: (body && body.error) || 'rating was not saved' };
+    if (!res || !res.ok || !body || !body.ok || !body.rating || !Array.isArray(body.rating.entries)) {
+      const status = Number(res && res.status) || 0;
+      const reason = String(body && body.error || '');
+      // Read rejected responses too. Keep UI copy actionable without exposing arbitrary storage paths.
+      let error = 'Rating was not saved — try again.';
+      if (!res) error = 'Cannot reach the rating service — try again.';
+      else if (reason === 'station generation changed; reload before rating') error = 'Station changed — reload the app before rating this work.';
+      else if (reason === 'rateable run not found') error = 'This task is not in the saved run history, so it cannot be rated.';
+      else if (reason === 'run did not produce rateable agent work') error = 'This task did not finish with rateable work.';
+      else if (status === 401 || status === 403) error = 'Rating connection was rejected — reload the app and try again.';
+      else if (status === 503 || (body && body.growthUnavailable)) error = 'Rating history is unavailable — try again after restarting the app.';
+      else if (status >= 500) error = 'The rating service could not save this rating — try again.';
+      return { ok: false, error, status };
+    }
     let applied = false;
     for (const entry of body.rating.entries) {
       const result = onEvent('memory.feedback', entry, { noPersist: true });

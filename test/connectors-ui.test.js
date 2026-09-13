@@ -9,6 +9,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const vm = require('node:vm');
 const A = require('./_assert.js');
 const { makeConnectorManager } = require('../sidecar/mcp/manager.js');
 
@@ -84,6 +85,18 @@ function fakeStack(tools) {
     A.ok(threw, 'array headers are rejected');
   }
 
+  // durable missing-field requirements are a runtime gate even if a caller or hand-edited file sets enabled=true.
+  {
+    const { seen, makeTransport, makeClient } = fakeStack([]);
+    const m = makeConnectorManager({ makeTransport, makeClient, makeToolDef: () => ({}) });
+    const r = await m.configure('incomplete', { transport: 'stdio', command: 'node', enabled: true,
+      missingFields: ['args:0', 'env:ACCESS'] });
+    A.eq(r.ok, false, 'an enabled incomplete connector is refused by the runtime');
+    A.ok(/args:0/.test(r.error) && /env:ACCESS/.test(r.error), 'runtime refusal names the durable missing fields');
+    A.eq(seen.transport, null, 'runtime does not create a transport for incomplete configuration');
+    A.eq(m.status('incomplete').missingFields, ['args:0', 'env:ACCESS'], 'safe status exposes only the missing field names');
+  }
+
   // oauth connectors pass a tokenProvider() (not a frozen token) so EVERY (re)connect/Reload fetches a FRESH bearer
   // — the fix for the token dying ~1h into a session. The resolved token never leaks into the summary.
   {
@@ -98,6 +111,9 @@ function fakeStack(tools) {
     A.ok(JSON.stringify(s).indexOf('fresh-1') === -1, 'the resolved oauth token never leaves the summary');
     await m.refresh('oa');
     A.eq(seen.transport.token, 'fresh-2', 'Reload/refresh re-invokes the tokenProvider (fresh bearer, not a frozen stale one)');
+    await m.configure('oa', { transport: 'http', url: 'https://mcp.example/x', token: 'manual', tokenProvider: null, enabled: false });
+    A.eq(m.status('oa').oauth, false, 'an explicit null tokenProvider switches the runtime out of OAuth mode');
+    A.eq(m.status('oa').hasToken, true, 'the replacement manual token remains configured after leaving OAuth mode');
   }
 
   // ---------- 2. SOURCE GUARD: the frontend panel ----------
@@ -189,9 +205,9 @@ function fakeStack(tools) {
   A.ok(/data-cc-act="key"/.test(station) && /data-cc-key=/.test(station), 'apikey connectors reveal an inline key field');
   A.ok(/data-cc-act="signin"/.test(station) && /function ccSignIn/.test(station), 'oauth connectors get a live SIGN IN button + handler');
   A.ok(/action = e\.url/.test(station), 'an oauth entry with no endpoint is NOT shown as sign-in-able (no dead button — truthful telemetry)');
-  A.ok(/data-cc-act="oclient"/.test(station) && /data-cc-oclientid/.test(station) && /data-cc-oclientsecret/.test(station), 'static OAuth cards expose the one-time client setup fields');
-  A.ok(/clientSecretRequired/.test(station) && /paste the client secret too/.test(station), 'required static OAuth client secrets fail closed in the UI');
-  A.ok(/\/api\/connectors\/oauth\/client/.test(station), 'static OAuth setup saves through the protected sidecar route');
+  A.ok(!/data-cc-act="oclient"|data-cc-oclientid|data-cc-oclientsecret/.test(station), 'customers never see Google developer credential fields');
+  A.ok(/signInAvailable/.test(station) && /GOOGLE SIGN-IN UNAVAILABLE/.test(station), 'unconfigured builds show a truthful operator-owned availability state');
+  A.ok(!/\/api\/connectors\/oauth\/client/.test(station), 'customer UI never saves an OAuth application registration');
   // url-less oauth entries with an aggregator route get a LIVE "VIA <name>" jump, never a mute disabled button
   A.ok(/data-cc-act="via"/.test(station) && /data-via=/.test(station), 'url-less oauth entries with `via` get a live VIA jump button');
   A.ok(/scrollIntoView/.test(station) && /cc-jump/.test(station), 'the VIA jump scrolls to + flashes the aggregator card');
@@ -221,7 +237,28 @@ function fakeStack(tools) {
   A.ok(/Array\.isArray\(e\.presets\)/.test(webStation) && /PRESETS ·/.test(webStation),
     'web build carries the same preset rendering');
   // truthful telemetry: ADDED state comes from the backend `installed` flag, and live state is re-read after add
-  A.ok(/e\.installed/.test(station) && /✓ ADDED/.test(station), 'an already-installed connector shows ADDED (from backend state, not guessed)');
+  const renderCatalog = require('node:vm').runInNewContext('(' + station.slice(station.indexOf('function ccCard('), station.indexOf('    function ccGroupHTML')) + ')', {
+    CC_CHIP: { none: ['', 'no setup', 'green'] }, esc: x => String(x == null ? '' : x), ccSeal: () => '', location: { port: '8787' }
+  });
+  const savedCard = renderCatalog({ id: 'fixture', name: 'Fixture', installed: true, blurb: 'test' }, 0);
+  A.ok(savedCard.includes('data-cc-act="manage"') && !savedCard.includes('disabled'), 'saved service has an actionable management button');
+  A.ok(savedCard.includes('Setup saved.') && !savedCard.includes('✓ connected'), 'saved configuration does not assert live connectivity');
+  const newCard = renderCatalog({ id: 'fixture', name: 'Fixture', installed: false, blurb: 'test' }, 0);
+  A.ok(newCard.includes('data-cc-act="add"') && !newCard.includes('MANAGE SERVICE'), 'new service still offers its actual setup action');
+  const popularGroups = vm.runInNewContext('(' + A.fnBody(station, 'function ccPopularGroups(') + ')');
+  const inputGroups = [{ category: 'Productivity', connectors: [
+    { id: 'gmail', url: 'google', releaseDeferred: true },
+    { id: 'notion', url: 'notion' }, { id: 'custom', url: 'custom' },
+    { id: 'asana', url: 'asana', signInAvailable: false }
+  ] }, { category: 'Developer Tools', connectors: [{ id: 'github', url: 'github' }] }];
+  const ordered = popularGroups(inputGroups);
+  A.eq(ordered[0].category, 'Popular', 'popular services precede categories');
+  A.eq(ordered[0].connectors.map(e => e.id).join(','), 'notion,github', 'popular picks exclude unavailable services');
+  A.eq(ordered.flatMap(g => g.connectors).length, 5, 'moving popular cards neither duplicates nor drops services');
+  A.eq(inputGroups[0].connectors.length, 4, 'popular grouping preserves source groups');
+  A.eq(popularGroups([{ category: 'Other', connectors: [{ id: 'custom' }] }])[0].category, 'Other', 'no empty popular heading');
+  const keyCard = renderCatalog({ id: 'key', name: 'Key service', authType: 'apikey', homepage: 'https://example.com', blurb: 'test' });
+  A.ok(keyCard.includes('SET UP API KEY') && keyCard.includes('Paste it below, then choose CONNECT'), 'key setup states the next action before submission');
   A.ok(/state === 'up'/.test(station), 'the connect result badge reflects the real manager state, not an assumption');
   // on-theme styling for the new cards
   A.ok(/\.cc-card/.test(css) && /\.cc-grid/.test(css) && /\.cc-chip/.test(css), 'catalog card styles present');
@@ -264,8 +301,8 @@ function fakeStack(tools) {
     'KEYS labels custom-header credentials truthfully instead of calling every credential a token');
   A.ok(/k\.unattendedSupported !== false/.test(station) && /k\.enabled && unattendedSupported \? '' : ' disabled'/.test(station),
     'KEYS disables the unattended control for watched-only integrations');
-  A.ok(/p\.unattendedSupported === false \? 'oauth' : 'apikey'/.test(station),
-    'watched-only platform rows enter the unified catalog under OAuth rather than API-key automation');
+  A.ok(/p\.unattendedSupported === false \? 'manual' : 'apikey'/.test(station),
+    'watched-only platform rows are explicitly manual setup, not automatic sign-in or API-key automation');
   A.ok(/Harness\.api\.get\('\/api\/servicekeys\/catalog'\)/.test(station) && /platformApi:\s*true/.test(station),
     'CATALOG consumes the keyed-platform directory while keeping those rows explicitly distinct from MCP connectors');
   A.ok(/data-cc-act="platform"/.test(station) && /function ccPrefillPlatform/.test(station),
@@ -274,8 +311,42 @@ function fakeStack(tools) {
     'platform cards are identity-namespaced so GitHub/Notion/Stripe cannot collide with same-id MCP cards');
   A.ok(!/id="ky-catalog"/.test(station) && /CONNECTED API KEYS/.test(station),
     'KEYS shows connected credentials and no longer hides the curated platform catalog inside its add form');
-  A.ok(/to: 'catalog', title: 'Connect a platform API or POD service'/.test(station) && /Choose the platform here, then paste its key/.test(station),
+  const routeSource = /const ROUTES = (\[[\s\S]*?\n\s*\]);/.exec(station);
+  const routes = routeSource ? vm.runInNewContext(routeSource[1]) : [];
+  const podRoute = routes.find(r => /print.on.demand|\bPOD\b/i.test(r.title + ' ' + r.blurb));
+  A.ok(podRoute && podRoute.to === 'catalog',
     'the ABILITIES front door routes POD discovery through CATALOG before the KEYS setup path');
+  A.eq(routes.filter(r => r.to === 'catalog').length, 1,
+    'service and platform discovery share one catalog route');
+  A.ok(/to: 'catalog', title: 'Connect a service you use'/.test(station) && /entry\.platformApi \? 'keys' : 'mcp'/.test(station),
+    'one service front door preserves the correct platform-key and connector management paths');
 
+  const availabilitySource = A.fnBody(station, 'function tsAvailability(');
+  const availability = vm.runInNewContext('(' + availabilitySource + ')');
+  A.eq(availability({available:true, enabled:false, switchEffective:false}), 'AVAILABLE', 'Full Access overrides a saved disabled switch');
+  A.eq(availability({available:true, enabled:true, placed:false, profileGranted:true, switchEffective:true}), 'AVAILABLE', 'execution profile grants do not require a prop');
+  A.eq(availability({available:false, enabled:false, placed:false, switchEffective:true}), 'DISABLED', 'effective disabled switch takes priority over missing equipment');
+  A.eq(availability({available:false, enabled:true, placed:false, profileGranted:false, switchEffective:true}), 'NEEDS PROP', 'ASK mode without any grant identifies missing equipment');
+  A.eq(availability({available:false, enabled:true, placed:true, switchEffective:false}), 'UNAVAILABLE', 'missing host grant never implies availability');
+
+  // Production row rendering: the glance must preserve status and recovery actions while technical
+  // detail stays available behind one disclosure. Escaping still applies inside the folded content.
+  const renderService = vm.runInNewContext('(' + A.fnBody(station, 'function row(') + ')', {
+    esc: s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
+    badge: s => ['var(--ph)', s]
+  });
+  const deferredRow = renderService({id:'google-sheets',label:'Google Sheets',releaseDeferred:true,credentialSaved:true,oauth:true,url:'https://example.test',detail:'Shared release explanation'},0);
+  const glance = deferredRow.replace(/<details[\s\S]*?<\/details>/g, '');
+  A.ok(glance.includes('Google Sheets') && glance.includes('deferred') && glance.includes('Saved connection retained.'), 'deferred glance preserves service, availability and retained setup');
+  A.ok(!glance.includes('https://') && !glance.includes('Account identity') && !glance.includes('Shared release explanation'), 'technical caveats and repeated release prose do not compete in the glance');
+  A.ok(/<details class="mc-inspect">/.test(deferredRow) && !/<details[^>]*\bopen\b/.test(deferredRow), 'connection details start folded');
+  A.ok(!/data-act="(?:reload|edit|resign)"/.test(deferredRow) && /data-act="remove"/.test(deferredRow), 'deferred service keeps removal without offering unavailable connection actions');
+  const rejectedRow = renderService({id:'expired',oauth:true,oauthAuthorized:true,authRequired:true,enabled:true,state:'error',url:'https://example.test',detail:'Rejected <grant>'},0);
+  A.ok(rejectedRow.includes('Sign in below') && rejectedRow.includes('data-act="resign"'), 'rejected OAuth grant has a visible recovery instruction and sign-in action');
+  A.ok(rejectedRow.includes('Error &amp; connection details') && rejectedRow.includes('Rejected &lt;grant>'), 'complete error stays inspectable and escaped');
+  A.ok(!rejectedRow.includes('· OAuth authorized'), 'stored rejected OAuth grant does not claim authorization');
+  const toolsRow = renderService({id:'docs',state:'up',enabled:true,tools:['read_docs','search_docs'],toolCount:2,url:'https://example.test'},0);
+  A.ok(toolsRow.includes('2 tools') && /<details[\s\S]*read_docs[\s\S]*search_docs[\s\S]*<\/details>/.test(toolsRow), 'tools remain fully inspectable without an always-expanded tool wall');
+  A.ok(/\.mc-row\s*\{[^}]*flex-direction:\s*column/.test(css), 'shared record cards stack instead of inheriting the legacy horizontal header');
   A.report('connectors-ui');
 })().catch(e => { console.log('FAIL: threw ' + (e && e.stack || e)); process.exit(1); });

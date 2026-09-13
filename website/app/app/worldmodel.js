@@ -138,8 +138,12 @@ const WorldModel = (() => {
      sole source: add a colour here and it appears in the SURFACE palette's COLOUR row AND as a room floor
      style automatically. */
   const FLOOR_STYLES = {
-    hull:     { base: '#33302a', label: 'HULL' },
-    corridor: { base: '#2c2924', label: 'DECKING' },
+    // 2026-09-02: hull #33302a -> #3c3429, decking #2c2924 -> #342d25. The stock hab is what every
+    // new station boots on and it measured the greyest room in the building (mean chroma 11 on a
+    // furnished floor vs 22 on oak). Same value band, a notch of warmth — the lamp pools finally
+    // have a colour to land on. Every other swatch is untouched.
+    hull:     { base: '#3a3b41', label: 'HULL' },
+    corridor: { base: '#31333a', label: 'DECKING' },
     cobalt:   { base: '#2b3340', label: 'COBALT' },
     rust:     { base: '#3a302a', label: 'RUST' },
     sterile:  { base: '#34383a', label: 'STERILE' },
@@ -189,6 +193,7 @@ const WorldModel = (() => {
   const FLOOR_MATERIALS = {
     // the hab default since 2026-07-25 — see the note above deckSpine in stationbake.js
     spine: { label: 'SPINE',  pitch: [4, 3], suggest: null },
+    alloy: { label: 'ALLOY', pitch: [4, 3], suggest: 'hull' },
     plate: { label: 'PLATE',  pitch: [2, 2], suggest: null },
     panel: { label: 'PANEL',  pitch: [4, 1], suggest: null },
     tile:  { label: 'TILE',   pitch: [2, 2], suggest: null },
@@ -201,11 +206,23 @@ const WorldModel = (() => {
     turf:  { label: 'TURF',   pitch: [1, 1], suggest: 'meadow' },
     // v6 CORRIDOR candidates — decks sized and surfaced for a passage rather than a room.
     // See the note above deckRunner in stationbake.js.
+    // 2026-09-03 additions — painters live above paintDeck in stationbake.js
+    diamond: { label: 'DIAMOND', pitch: [1, 1], suggest: null },
+    resin:   { label: 'RESIN',   pitch: [4, 4], suggest: 'sterile' },
+    ceramic: { label: 'CERAMIC', pitch: [3, 3], suggest: 'bone' },
+    cargo:   { label: 'CARGO',   pitch: [3, 2], suggest: 'rust' },
     runner:   { label: 'RUNNER',   pitch: [2, 2], suggest: null },
     treadway: { label: 'TREADWAY', pitch: [3, 2], suggest: null },
     meshway:  { label: 'MESHWAY',  pitch: [3, 3], suggest: null },
+    // Cut-stone slabs, herringbone wood and ribbed industrial mat.
+    basalt:   { label: 'BASALT',   pitch: [3, 2], suggest: 'hull' },
+    parquet:  { label: 'PARQUET',  pitch: [3, 3], suggest: 'walnut' },
+    rubber:   { label: 'RUBBER',   pitch: [2, 2], suggest: 'corridor' },
+    slotted:  { label: 'SLOTTED',  pitch: [3, 2], suggest: 'corridor' },
+    terrazzo: { label: 'TERRAZZO', pitch: [4, 4], suggest: 'hull' },
+    octile:   { label: 'OCTILE',   pitch: [2, 2], suggest: 'sterile' },
   };
-  const MAT_ORDER = ['spine', 'runner', 'treadway', 'meshway', 'plate', 'panel', 'tile', 'tread', 'soft', 'grate', 'hex', 'plank', 'turf'];
+  const MAT_ORDER = ['spine', 'alloy', 'runner', 'treadway', 'meshway', 'plate', 'diamond', 'cargo', 'panel', 'tile', 'ceramic', 'resin', 'tread', 'soft', 'grate', 'hex', 'plank', 'turf', 'basalt', 'parquet', 'rubber', 'slotted', 'terrazzo', 'octile'];
 
   /* the WALL material catalog — the deck's opposite number. Walls carry the same two axes as the
      floor (hue × recipe) and read from the same FLOOR_STYLES hue catalog, because a room should be
@@ -253,6 +270,7 @@ const WorldModel = (() => {
      in the REFIT SURFACE palette's HULL target automatically. */
   const HULL_MATERIALS = {
     station:   { label: 'STATION',   suggest: null,     blurb: 'riveted hull plate — the shell you launched with' },
+    monocoque: { label: 'MONOCOQUE', suggest: 'bone', blurb: 'large inset alloy panels with recessed joints and protected edge rails' },
     timber:    { label: 'TIMBER',    suggest: 'walnut', blurb: 'stacked log courses — the cabin' },
     clapboard: { label: 'CLAPBOARD', suggest: 'ash',    blurb: 'lapped siding boards — the farmhouse' },
     shingle:   { label: 'SHINGLE',   suggest: 'oak',    blurb: 'overlapping shingles — a pitched roof from above' },
@@ -262,7 +280,7 @@ const WorldModel = (() => {
     curtain:   { label: 'CURTAIN',   suggest: 'indigo', blurb: 'glass curtain wall + mullions — the tower' },
     hedge:     { label: 'HEDGE',     suggest: 'fern',   blurb: 'clipped hedge — the garden wall' },
   };
-  const HULL_ORDER = ['station', 'timber', 'clapboard', 'shingle', 'brick', 'stone', 'stucco', 'curtain', 'hedge'];
+  const HULL_ORDER = ['station', 'monocoque', 'timber', 'clapboard', 'shingle', 'brick', 'stone', 'stucco', 'curtain', 'hedge'];
 
   /* room categories — a capability-zone label + a default floor (hue + material). kind drives
      nothing behavioural yet (capability mapping is a later pass); it tags the zone + seeds the
@@ -1037,6 +1055,17 @@ const WorldModel = (() => {
       const dirty = rm.rects.slice();
       delete doc.rooms[id];
       doc.order = doc.order.filter(x => x !== id);
+      // Remove the deck and its supported contents in one undo snapshot.
+      // A straddling prop loses support too; neighboring-room contents stay intact.
+      doc.props = doc.props.filter(p => {
+        const f = propFootprint(p);
+        if (!rm.rects.some(r => rectsHit(f, r))) return true;
+        dirty.push(f); return false;
+      });
+      for (const key of Object.keys(doc.belts)) {
+        const [x, y] = key.split(',').map(Number);
+        if (rm.rects.some(r => x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2)) delete doc.belts[key];
+      }
       emit(dirty);
       return { ok: true };
     }
@@ -1896,30 +1925,44 @@ const WorldModel = (() => {
          seam that a door is meant to gate); and an exact diagonal step demands BOTH corner tiles plus the
          canStep legality of both ways around — so a shortcut can't squeeze a body through the diagonal gap
          between two blockers. canStep is orthogonal-only, so it is never called on a diagonal pair. */
-      function losClear(x0, y0, x1, y1, extra) {
+      // Validate both the logical tile-centre route and the rendered foot route.
+      // world.js footOf uses (x + .5, y + 1 - 1/TILE), so a centre-only
+      // shortcut can cross a wall beside a doorway even when its BFS is legal.
+      function segmentClear(ax, ay, bx, by, extra) {
+        if (![ax, ay, bx, by].every(Number.isFinite)) return false;
+        const x0 = Math.floor(ax), y0 = Math.floor(ay), x1 = Math.floor(bx), y1 = Math.floor(by);
         let x = x0, y = y0;
-        let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
-        const xi = x1 > x0 ? 1 : -1, yi = y1 > y0 ? 1 : -1;
-        let err = dx - dy;
-        dx *= 2; dy *= 2;
-        let guard = dx + dy + 4;   // the walk is bounded; never trust the loop to terminate on its own
+        const dx = Math.abs(bx - ax), dy = Math.abs(by - ay);
+        const xi = bx > ax ? 1 : -1, yi = by > ay ? 1 : -1;
+        const stepX = dx ? 1 / dx : Infinity, stepY = dy ? 1 / dy : Infinity;
+        let nextX = dx ? (xi > 0 ? x + 1 - ax : ax - x) / dx : Infinity;
+        let nextY = dy ? (yi > 0 ? y + 1 - ay : ay - y) / dy : Infinity;
+        let guard = Math.abs(x1 - x0) + Math.abs(y1 - y0) + 1;
         while ((x !== x1 || y !== y1) && guard-- > 0) {
           if (!walkable(x, y, extra)) return false;
-          if (err > 0) {
+          if (nextX < nextY - 1e-10) {
             if (!walkable(x + xi, y, extra) || !canStep(x, y, x + xi, y)) return false;
-            x += xi; err -= dy;
-          } else if (err < 0) {
+            x += xi; nextX += stepX;
+          } else if (nextY < nextX - 1e-10) {
             if (!walkable(x, y + yi, extra) || !canStep(x, y, x, y + yi)) return false;
-            y += yi; err += dx;
-          } else {   // exact diagonal — both corners open, and legal whichever way round we go
+            y += yi; nextY += stepY;
+          } else {
+            // At a grid corner both orthogonal passages must be open.
             if (!walkable(x + xi, y, extra) || !walkable(x, y + yi, extra)) return false;
             if (!canStep(x, y, x + xi, y) || !canStep(x, y, x, y + yi)) return false;
             if (!canStep(x + xi, y, x + xi, y + yi) || !canStep(x, y + yi, x + xi, y + yi)) return false;
-            x += xi; y += yi; err -= dy; err += dx;
+            x += xi; y += yi; nextX += stepX; nextY += stepY;
           }
         }
         return guard > 0 && walkable(x1, y1, extra);
       }
+      function losClear(x0, y0, x1, y1, extra) {
+        const fy = 1 - 1 / TILE;
+        return segmentClear(x0 + .5, y0 + .5, x1 + .5, y1 + .5, extra)
+          && segmentClear(x0 + .5, y0 + fy, x1 + .5, y1 + fy, extra);
+      }
+      // Pixel-space companion for actual starts, corner lookahead and body nudges.
+      const clearFootSegment = (ax, ay, bx, by, extra) => segmentClear(ax / TILE, ay / TILE, bx / TILE, by / TILE, extra);
       function smoothPath(pts, sx, sy, extra) {
         if (!pts || pts.length < 3) return pts;
         const out = [];
@@ -1965,7 +2008,7 @@ const WorldModel = (() => {
         TILE, COLS, ROWS, W: COLS * TILE, H: ROWS * TILE + HULL_PAD,
         origin: { tx: ox, ty: oy },
         allRects, zones, ROOM_IDS, isCorridor, chamfers, windows: [], props: propsLocal, belts: beltsLocal,
-        doorDefs, zoneGrid, idx, canStep, baseColorOf, walkable, path, blockedTiles,
+        doorDefs, zoneGrid, idx, canStep, baseColorOf, walkable, path, clearFootSegment, blockedTiles,
         nameOf: id => (doc.rooms[id] ? doc.rooms[id].name : ''),
         kindOf: id => (doc.rooms[id] ? doc.rooms[id].kind : null),
         matOf: id => matOfRoom(doc.rooms[id]),   // effective deck material (override, else kind default)
@@ -2372,6 +2415,21 @@ const WorldModel = (() => {
     create: doc => makeStation(doc),
     deserialize: doc => makeStation(clone(doc)),
     defaultDoc: freshDoc,
+    // Product entry composition. Keep the empty construction document available to
+    // importers and layout tools; existing saves never pass through this factory.
+    starterDoc() {
+      const doc = freshDoc();
+      const room = doc.rooms[doc.meta.spawnRoomId];
+      room.rects = [{ x1: 0, y1: 0, x2: 13, y2: 8 }];
+      room.name = 'HAB-01';
+      room.hullStyle = 'bone';
+      doc.props = [
+        { id: 'p' + doc._nid++, t: 'crate', x: 1, y: 1, w: 2, h: 1, block: true },
+        { id: 'p' + doc._nid++, t: 'rackV', x: 11, y: 1, w: 1, h: 2, block: true },
+        { id: 'p' + doc._nid++, t: 'plant', x: 11, y: 6, w: 1, h: 1, block: false }
+      ];
+      return doc;
+    },
     // pure helpers reused by the build layer
     normRect, rectW, rectH, rectsHit, inRect,
     // install the prop-type -> {mount, surface} lookup once for every station this module makes

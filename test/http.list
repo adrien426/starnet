@@ -1,8 +1,14 @@
 # Sidecar/HTTP integration gate. Run in order by scripts/run-test-list.mjs; one isolated Node process per line.
 test/provider-recovery.e2e.test.js
+test/customer-journey.e2e.test.js
+test/group-sessions.http.test.js
 test/tool-model-fallback.e2e.test.js
 test/sidecar.http.test.js
+test/channels.replay.e2e.test.js
 test/config-permissions-import.e2e.test.js
+test/connector-security.e2e.test.js
+test/connector-oauth-refresh-race.e2e.test.js
+test/github-device.http.test.js
 test/workspace-owner.e2e.test.js
 test/workspace-lineage.http.test.js
 test/lineage-stationless-halt.http.test.js
@@ -14,6 +20,7 @@ test/full-access.e2e.test.js
 test/output-recovery.e2e.test.js
 test/project-root.e2e.test.js
 test/live-doctor.e2e.test.js
+test/report-0110.e2e.test.js
 test/scout.http.test.js
 test/discovery.http.test.js
 test/outcomes.http.test.js
@@ -31,6 +38,8 @@ test/e2e.dispatch-session.test.js
 test/e2e.worker-access.test.js
 test/e2e.pathtrust.test.js
 test/e2e.subagent-background.test.js
+test/google-signin.e2e.test.js
+test/google-release-deferred.e2e.test.js
 test/e2e.mcp-connector.test.js
 test/e2e.mcp-session-expiry.test.js
 test/e2e.idempotency.test.js
@@ -84,7 +93,24 @@ test/routes-coverage.http.test.js
 test/atlas-events.emit.e2e.test.js
 test/openai-compat.e2e.test.js
 test/station-recovery.e2e.test.js
+test/paid-link-lifecycle.e2e.test.js
 test/routing.persist.e2e.test.js
 test/run-recovery.api.test.js
 test/routing.sample.e2e.test.js
+test/routing.sample-provider.e2e.test.js
 test/route-honesty.e2e.test.js
+test/effective-toolsets.e2e.test.js
+test/discovery-documents.http.test.js
+test/workflow-takeover.http.test.js
+test/task-conversation.http.test.js
+test/emergency-recovery.http.test.js
+
+test/growth-rating-upgrade.e2e.test.js
+test/managed-image.e2e.test.js
+test/managed-endpoint.e2e.test.js
+
+test/tool-projection.e2e.test.js
+test/request-idempotency.e2e.test.js
+test/output-only-repair.e2e.test.js
+test/saved-provider-fallback.e2e.test.js
+test/delegated-connectors.e2e.test.js

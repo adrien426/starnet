@@ -4,9 +4,9 @@
           straight through Chat.send — identical to typing — so all of chat.js's
           busy / purpose / task-vs-talk logic is reused with zero duplication.
    OUTPUT (agent voice): when an agent speaks a conversational reply (the same moment
-          it shows a speech bubble via World.say), it is spoken ALOUD in the ONE locked
-          station voice (Personas.STATION_VOICE — Ultron); personality changes what the
-          agent SAYS, never how it sounds.
+          it shows a speech bubble via World.say), it is spoken aloud using the agent's
+          assigned built-in voice, or the existing station recipe when unassigned.
+          Personality controls the words independently of the chosen voice.
 
    STT prefers the recorder → /api/stt (server Whisper) wherever the mic can be recorded — Chrome's
    browser-native SpeechRecognition is Google-served and CENSORS profanity to asterisks with no opt-out,
@@ -404,6 +404,9 @@ const Voice = (() => {
     return curve;
   }
   function ensureFxGraph() {
+    if (fxCtx && fxCtx.state === 'closed') {
+      fxCtx = null; fxIn = null; fxAnalyser = null; fxReady = false; fxBroken = false;
+    }
     if (fxReady || fxBroken) return fxReady;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -435,7 +438,7 @@ const Voice = (() => {
     if (!TRANSMISSION_FX) return false;
     if (!ensureFxGraph()) return false;
     try {
-      if (fxCtx.state === 'suspended') { try { fxCtx.resume(); } catch (_) {} }
+      if (!resumeSpeechContext(fxCtx)) return false;
       if (!a._fxSrc) a._fxSrc = fxCtx.createMediaElementSource(a);
       a._fxSrc.connect(fxIn);
       return true;
@@ -465,6 +468,9 @@ const Voice = (() => {
     return buf;
   }
   function ensureShellGraph() {
+    if (shCtx && shCtx.state === 'closed') {
+      shCtx = null; shIn = null; shAnalyser = null; shN = null; shBroken = false;
+    }
     if (shN || shBroken) return !!shN;
     try {
       const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { shBroken = true; return false; }
@@ -519,7 +525,7 @@ const Voice = (() => {
   function routeThroughShell(a, cfg) {
     if (!ensureShellGraph()) return false;
     try {
-      if (shCtx.state === 'suspended') { try { shCtx.resume(); } catch (_) {} }
+      if (!resumeSpeechContext(shCtx)) return false;
       applyShellAmounts(cfg);
       if (!a._shSrc) a._shSrc = shCtx.createMediaElementSource(a);
       a._shSrc.connect(shIn);
@@ -531,21 +537,23 @@ const Voice = (() => {
   // browser path. playbackRate gives the per-personality pacing (Gemini TTS takes no speed param).
   // deep=true disables pitch-preservation, so a sub-1 rate lowers PITCH along with pace — the character-
   // voice register (persona ttsDeep). Vendor-prefixed setters for older engines; all guarded.
-  function playBlob(blob, onEnd, volume, onFail, rate, deep, shell) {
+  function playBlob(blob, onEnd, volume, onFail, rate, deep, shell, onStarted) {
     let url = null, a = null, done = false;
     const cleanup = () => {
+      done = true; // cancellation also fences a late rejected play() promise
+      if (a) { a.onplay = null; a.onended = null; a.onerror = null; }
       if (url) { try { URL.revokeObjectURL(url); } catch (_) {} url = null; }
       if (currentAudio === a) currentAudio = null;
       if (currentAudioCleanup === cleanup) currentAudioCleanup = null;
     };
     const endOk = () => { if (done) return; done = true; cleanup(); onSpeakEnd(); onEnd && onEnd(); };
-    const endFailed = () => {
+    const endFailed = error => {
       if (done) return;
       done = true;
       cleanup();
       // A decode error may arrive after `onplay`; always leave speaking + metering before advancing.
       onSpeakEnd();
-      if (onFail) onFail();
+      if (onFail) onFail(error || (a && a.error) || new Error('media playback failed'));
       else if (onEnd) onEnd();
     };
     try {
@@ -566,19 +574,18 @@ const Voice = (() => {
       if (shell && routeThroughShell(a, shell)) outAnalyser = shAnalyser;
       else if (routeThroughFx(a)) outAnalyser = fxAnalyser;
       else outAnalyser = null;              // dry playback: no tap, so the meter reports nothing rather than lying
-      a.onplay = () => onSpeakStart();
+      a.onplay = () => { onSpeakStart(); if (onStarted) onStarted(); };
       a.onended = endOk;
-      // a decode/format error on the neural blob is exactly the "try the browser voice" case — route
-      // it to onFail (fallback) rather than treating it as a clean finish (which would go SILENT).
-      a.onerror = endFailed;
+      // Preserve the media error for bounded playback recovery and an attributed interruption.
+      a.onerror = () => endFailed(a.error);
       const p = a.play();
       if (p && p.catch) p.catch(err => {
         if (done) return;
         // browser still blocking audio (no gesture yet) → tell the user instead of going silently quiet
         if (err && err.name === 'NotAllowedError') setStatus('🔇 tap anywhere to turn on the agent\'s voice');
-        endFailed();
+        endFailed(err);
       });
-    } catch (_) { endFailed(); }
+    } catch (error) { endFailed(error); }
   }
 
   /* Browsers block programmatic <audio> playback until the page has had a user gesture — so right after a
@@ -586,6 +593,16 @@ const Voice = (() => {
      typed, not tied to that gesture). Unlock the audio path on the first gesture with a muted, valid silent
      WAV play, so the neural voice always plays. Idempotent; runs exactly once. */
   let audioArmed = false;
+  // Capturing an element into a stopped graph silences its native output and may prevent
+  // ended/error forever. Recover best-effort, but leave this element dry until it is running.
+  function resumeSpeechContext(ctx) {
+    if (!ctx) return false;
+    if (ctx.state === 'running') return true;
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (_) {}
+    }
+    return ctx.state === 'running';
+  }
   function silentWav() {
     const n = 8, b = new ArrayBuffer(44 + n), v = new DataView(b);
     const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
@@ -596,6 +613,7 @@ const Voice = (() => {
     return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
   }
   function armAudio() {
+    resumeSpeechContext(fxCtx); resumeSpeechContext(shCtx);
     if (audioArmed) return; audioArmed = true;
     try { const u = silentWav(); const a = new Audio(u); a.volume = 0; const p = a.play(); if (p && p.catch) p.catch(() => {}); setTimeout(() => { try { URL.revokeObjectURL(u); } catch (_) {} }, 1000); } catch (_) {}
     try { if (typeof SFX !== 'undefined' && SFX.boot) SFX.boot(); } catch (_) {}   // also resume the SFX audio context
@@ -612,26 +630,62 @@ const Voice = (() => {
   /* Which built-in voice speaks. Saved per station; empty falls back to the engine's default (male).
      Read at SPEAK time, not cached, so changing it in Settings takes effect on the very next line. */
   const LOCAL_VOICE_KEY = 'starnet.liveVoice.localVoice.v1';
-  function localVoiceId() {
-    try { return String(localStorage.getItem(LOCAL_VOICE_KEY) || '').trim(); } catch (_) { return ''; }
+  const AGENT_VOICE_KEY = 'starnet.liveVoice.agentVoice.v1:';
+  function currentAgentId() {
+    try {
+      const bound = typeof VoiceLive !== 'undefined' && VoiceLive.boundSessionId ? VoiceLive.boundSessionId() : null;
+      const ws = typeof Workstreams !== 'undefined' ? (bound ? Workstreams.get(bound) : Workstreams.active()) : null;
+      return String(ws && ws.agentId || 'agent');
+    } catch (_) { return 'agent'; }
   }
-  // A Live Voice room has ONE speaker. Snapshot the selected identity when it opens, then pin whichever
+  function voiceChoice(agentId) {
+    try { return String(localStorage.getItem(agentId ? AGENT_VOICE_KEY + encodeURIComponent(agentId) : LOCAL_VOICE_KEY) || '').trim(); } catch (_) { return ''; }
+  }
+  function localVoiceId(agentId) {
+    return voiceChoice(agentId) || voiceChoice('');
+  }
+  function setVoiceChoice(id, agentId) {
+    const want = String(id || '').trim();
+    const key = agentId ? AGENT_VOICE_KEY + encodeURIComponent(agentId) : LOCAL_VOICE_KEY;
+    // Storage failures must reach the picker; never paint an assignment that was not saved.
+    if (want) localStorage.setItem(key, want); else localStorage.removeItem(key);
+    return { voice: want, appliesOn: 'the next spoken reply or new Live Voice session' };
+  }
+  function microphoneHelp() {
+    const desktop = !!(window.__TAURI__ || window.__TAURI_INTERNALS__);
+    const mac = /Mac/i.test(navigator.platform || navigator.userAgent || '');
+    return desktop && mac
+      ? 'Microphone blocked — enable StarNet in System Settings → Privacy & Security → Microphone, then quit and reopen StarNet. If it is missing or still blocked, install the latest StarNet build.'
+      : desktop ? 'Microphone blocked — allow microphone access for desktop apps in your system privacy settings, then try again.'
+        : 'Microphone blocked — allow microphone access for this page in your browser, then try again.';
+  }
+  // A Live Voice room pins each agent's identity when it first joins the conversation, then pins whichever
   // engine actually serves the first audible chunk (Kokoro or its mapped Edge floor). Without both locks,
   // every streamed sentence independently reread Settings and retried the ladder, so one transient model
   // failure could make the same reply alternate between two people. A locked engine may miss a chunk, but
   // it may never impersonate another speaker mid-session.
-  let sessionLocalVoiceId = '';
-  let sessionVoiceEngine = '';
+  let sessionDefaultVoice = '';
+  let sessionVoices = new Map();
+  let replyVoice = null;
+  function speechVoice(agentId) {
+    if (preferLocalTts && sessionVoices.has(agentId)) return sessionVoices.get(agentId);
+    const override = voiceChoice(agentId);
+    const selected = { agentId, local: preferLocalTts || !!override,
+      id: override || (preferLocalTts ? sessionDefaultVoice : localVoiceId()), engine: '' };
+    if (preferLocalTts) sessionVoices.set(agentId, selected);
+    return selected;
+  }
   function setLocalTts(value) {
     const next = !!value;
     if (next && !preferLocalTts) {
-      sessionLocalVoiceId = localVoiceId();
-      sessionVoiceEngine = '';
+      sessionDefaultVoice = localVoiceId();
+      sessionVoices.clear();
     } else if (!next) {
-      sessionLocalVoiceId = '';
-      sessionVoiceEngine = '';
+      sessionDefaultVoice = '';
+      sessionVoices.clear();
     }
     preferLocalTts = next;
+    if (next) speechVoice(currentAgentId());
   }
   let playIdx = 0;        // next job to PLAY
   let synthIdx = 0;       // next job to begin SYNTHESIZING (runs ahead of playIdx for prefetch)
@@ -644,33 +698,31 @@ const Voice = (() => {
   const MAX_INFLIGHT = 2;        // synth at most this many chunks ahead of playback
   const TTS_CHUNK_MAX = 1000;    // keep each synth call under the sidecar's 1200-char cap
 
-  function resetQueue() { jobs = []; playIdx = 0; synthIdx = 0; draining = false; playing = false; replyClosed = true; replyFails = 0; replyTried = false; }
+  function resetQueue() { jobs = []; replyVoice = null; playIdx = 0; synthIdx = 0; draining = false; playing = false; replyClosed = true; replyFails = 0; replyTried = false; }
 
-  // begin synthesizing one job → resolves to {kind:'neural',blob} | {kind:'silent'} | {kind:'skip'}.
-  // 'neural' plays; 'silent' means "no neural audio for this chunk — advance the queue, stay quiet" (there
-  // is NO robotic fallback); 'skip' is an intentional barge-in/teardown cancel. The page holds no key on
-  // desktop — the sidecar /api/tts resolves its own credential (keychain/env) or the free keyless floor.
-  // ONE round-trip for one chunk → {kind:'neural',blob} | {kind:'fail',reason} | {kind:'skip'}. Deliberately
-  // records NO failure state: startSynth owns the retry/cold-off policy so a retried blip isn't counted twice.
+  // One attempt returns audio, a recoverable/terminal failure, or an intentional cancellation.
+  // The sidecar owns credentials and the engine ladder. startSynth owns bounded retries/cold-off;
+  // pumpPlay owns the ordered outcome. Diagnostics contain operational metadata, never spoken text.
   function synthOnce(job) {
     const cred = ttsCred(), cfg = ttsConfig();
+    job.attempt = (job.attempt || 0) + 1;
     const ac = new AbortController(); job.ac = ac; ttsAbort = ac;
     return fetch('/api/tts', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ac.signal,
       body: JSON.stringify({
         key: cred.key, keyProvider: cred.provider, preferProvider: runProvider(),
         text: job.text, model: cfg.model, voice: cfg.voice, style: cfg.style,
-        local: preferLocalTts,
-        localVoice: preferLocalTts ? sessionLocalVoiceId : localVoiceId(),
-        localEngine: preferLocalTts ? sessionVoiceEngine : '',
+        local: job.voice.local,
+        localVoice: job.voice.id,
+        localEngine: job.voice.engine,
         speed: cfg.speed
       })
     }).then(async r => {
-      if (preferLocalTts && job.seq === speakSeq && !sessionVoiceEngine) {
+      if (job.voice.local && job.seq === speakSeq && !job.voice.engine) {
         const servedBy = String(r.headers.get('X-Voice-Provider') || '').toLowerCase();
         const engine = servedBy === 'local-kokoro' ? 'local-kokoro' : (servedBy.indexOf('edge:') === 0 ? 'edge' : '');
         if (engine) {
-          sessionVoiceEngine = engine;
+          job.voice.engine = engine;
           // The first request runs alone until it establishes the speaker. Resume normal prefetch now.
           pumpSynth();
         }
@@ -679,9 +731,11 @@ const Voice = (() => {
       if (r.ok && ct.indexOf('audio') === 0) { const blob = await r.blob(); if (blob && blob.size) return { kind: 'neural', blob }; }
       let reason = 'http ' + r.status;
       try { const j = await r.json(); if (j && j.reason) reason = j.reason; } catch (_) {}
+      if (job.seq === speakSeq) recordSpeechEvent('synthesis_failure', { chunk: jobs.indexOf(job), attempt: job.attempt, httpStatus: r.status, category: classifyFallback(reason), retryable: retryableFallback(reason) });
       return { kind: 'fail', reason };
     }).catch(e => {
-      if (e && e.name === 'AbortError') return { kind: 'skip' };   // intentionally cancelled — stay silent
+      if (e && e.name === 'AbortError' && job.seq !== speakSeq) return { kind: 'skip' };   // intentionally cancelled — stay silent
+      if (job.seq === speakSeq) recordSpeechEvent('synthesis_failure', { chunk: jobs.indexOf(job), attempt: job.attempt, code: String(e && e.name || 'network') });
       return { kind: 'fail', reason: 'network: ' + ((e && e.message) || e) };
     });
   }
@@ -694,32 +748,67 @@ const Voice = (() => {
     // reply is mid-flight we keep asking until THIS reply has failed MID_REPLY_GIVEUP times in a row; only then
     // does the cold-off apply to it. A reply that has not yet attempted anything (replyTried false — i.e. its
     // OPENING chunk) still honors the cold-off in full, so a dead provider is not hammered once per sentence.
-    if (Date.now() < neuralColdUntil && (!replyTried || replyFails >= MID_REPLY_GIVEUP)) { job.result = Promise.resolve({ kind: 'silent' }); return; }
+    if (Date.now() < neuralColdUntil && (!replyTried || replyFails >= MID_REPLY_GIVEUP)) { job.result = Promise.resolve({ kind: 'fail', reason: 'cooldown' }); return; }
     replyTried = true;
     const seq = job.seq;
     job.result = synthOnce(job)
-      // ONE immediate retry for a TRANSIENT failure (429 / network / 5xx) — a single provider blip must cost a
+      // Two retries for a TRANSIENT failure (429 / network / 5xx) — a single provider blip must cost a
       // beat of latency, not a whole sentence of the reply. A missing credential and an empty wallet are NOT
       // transient: don't burn a second call on them. Ask retryableFallback, not the message class: a keyless
       // station's reason ALWAYS carried the structural 'no key', which made this branch dead code there.
+      // Two bounded retries retain this exact chunk; later audio stays ordered.
       // A torn-down job (barge-in bumped speakSeq) is never retried.
       .then(res => (res.kind === 'fail' && retryableFallback(res.reason) && seq === speakSeq) ? synthOnce(job) : res)
+      .then(res => (res.kind === 'fail' && retryableFallback(res.reason) && seq === speakSeq) ? synthOnce(job) : res)
       .then(res => {
+        if (seq !== speakSeq) return { kind: 'skip' };
         if (res.kind === 'neural') { noteNeuralOk(); return res; }
         if (res.kind === 'skip') return res;   // intentional barge-in/teardown cancel — not a failure
         replyFails++;
         // cool the neural path off briefly (noteFallback lengthens this for 'no key'/'credits'); never latch.
         neuralColdUntil = Date.now() + NEURAL_COLD_MS;
-        console.warn('[voice] neural TTS unavailable → chunk silent:', res.reason);
+        console.warn('[voice] neural TTS recovery exhausted:', res.reason);
         noteFallback(res.reason);
-        return { kind: 'silent' };
+        return { kind: 'fail', reason: res.reason };
       });
   }
   function pumpSynth() {
-    const limit = preferLocalTts && !sessionVoiceEngine ? 1 : MAX_INFLIGHT;
+    const next = jobs[synthIdx];
+    const limit = next && next.voice.local && !next.voice.engine ? 1 : MAX_INFLIGHT;
     while (synthIdx < jobs.length && (synthIdx - playIdx) < limit) startSynth(jobs[synthIdx++]);
   }
 
+  const speechDiagnostics = [];
+  let replyNumber = 0;
+  let interruptionMessage = '';
+  function recordSpeechEvent(reason, details) {
+    const event = Object.assign({ at: Date.now(), reason, reply: replyNumber, generation: speakSeq }, details || {});
+    speechDiagnostics.push(event); if (speechDiagnostics.length > 100) speechDiagnostics.shift();
+    console.warn('[voice] speech event', event);
+    coordinatorEvent('onSpeechEvent', event);
+    return event;
+  }
+  function showInterruption(message) {
+    interruptionMessage = message;
+    let el = document.getElementById('voice-interruption');
+    if (!el && toggleBtn && toggleBtn.parentNode && document.createElement) {
+      el = document.createElement('span'); el.id = 'voice-interruption';
+      el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
+      toggleBtn.parentNode.appendChild(el);
+    }
+    if (el) { el.textContent = message; el.hidden = !message; }
+    reflectToggle();
+    if (message) coordinatorEvent('onSpeechInterrupted', { message });
+  }
+  function failReply(stage, job, error) {
+    if (job.seq !== speakSeq) return;
+    recordSpeechEvent(stage, { chunk: playIdx, characters: job.text.length,
+      code: String(error && (error.name || error.code) || 'unavailable') });
+    const cb = onReplyDone;
+    stopSpeaking(stage);
+    showInterruption('Speech interrupted — ' + (stage === 'playback_error' ? 'audio playback failed' : 'voice synthesis failed') + '. Full reply remains in chat.');
+    if (cb) cb();
+  }
   function pumpPlay() {
     if (playing) return;
     if (playIdx >= jobs.length) { if (replyClosed && synthIdx >= jobs.length) finishReply(); return; }
@@ -733,9 +822,27 @@ const Voice = (() => {
       if (res.kind === 'neural') {
         const cfg = ttsConfig();
         const rate = cfg.speed * (job.opts.speedMul || 1);
-        // a decode/playback failure on the neural blob → advance (skip this chunk silently). No robotic fallback.
-        playBlob(res.blob, advance, job.opts.volume, advance, rate, cfg.deep, cfg.shell);
-      } else { advance(); }   // 'silent' (no neural audio) or 'skip' (aborted) → play nothing, keep the queue moving
+        let attempts = 0;
+        const play = () => {
+          if (job.seq !== speakSeq) return;
+          attempts++;
+          playBlob(res.blob, () => { if (job.seq === speakSeq) advance(); }, job.opts.volume, error => {
+            if (job.seq !== speakSeq) return;
+            recordSpeechEvent('playback_error', { chunk: playIdx, attempt: attempts,
+              code: String(error && (error.name || error.code) || 'media_error') });
+            if (attempts < 2 && (!error || error.name !== 'NotAllowedError')) play();
+            else if (job.opts.mutter) advance();
+            else failReply('playback_error', job, error);
+          }, rate, cfg.deep, cfg.shell, () => {
+            if (job.seq === speakSeq && !job.opts.mutter) coordinatorEvent('onTiming', { audioStartMs: Math.max(0, Date.now() - job.queuedAt) });
+          });
+        };
+        play();
+      } else if (res.kind === 'fail') {
+        if (job.opts.mutter) advance(); // optional aside must not cancel the requested reply
+        else failReply('synthesis_failure', job);
+      }
+      else { advance(); }
     });
   }
   function finishReply() {
@@ -745,29 +852,6 @@ const Voice = (() => {
     if (wasDraining) { const cb = onReplyDone; onReplyDone = null; if (cb) cb(); }
   }
 
-  // FIRST-WORD fast path: the time-to-first-audio is dominated by how long the FIRST TTS call takes, which
-  // scales with the chunk's length. When a reply opens with one long chunk, peel a SHORT lead off the front
-  // (first clause: comma/semicolon/dash, else a word break near ~120 chars) so the first synth call is tiny
-  // and audio starts almost immediately; the remainder rides the normal queue behind it. Only splits a big
-  // first chunk — short chunks are already fast, and later chunks already overlap playback. Returns [lead, rest]
-  // or [whole] if no worthwhile split exists.
-  const FASTPATH_MIN = 140;   // only bother splitting a first chunk longer than this
-  function firstClauseSplit(s) {
-    if (s.length <= FASTPATH_MIN) return [s];
-    // prefer a natural clause boundary in the first ~130 chars. A SHORT lead is the whole point (fast first
-    // audio), so take the earliest usable clause break; only fall back to a word split if there's none.
-    const head = s.slice(0, 130);
-    let cut = -1;
-    const m = head.match(/^[\s\S]*?[,;:—–-](?=\s)/);    // up to & incl. the first clause punctuation followed by space
-    if (m && m[0].length >= 10) cut = m[0].length;      // ≥10 so we don't split on a 2-3 char stub ("Oh, ")
-    if (cut < 0) {                                        // no clause break → last word boundary before ~120
-      const back = s.slice(0, 120).lastIndexOf(' ');
-      if (back >= 40) cut = back;
-    }
-    if (cut < 0 || cut >= s.length - 10) return [s];      // nothing useful (or the split leaves a tiny tail)
-    return [s.slice(0, cut).trim(), s.slice(cut).trim()];
-  }
-
   /* ---- PRODUCER API ---- */
   // push one chunk of an in-progress reply (chat.js streams these sentence-by-sentence). The first chunk
   // opens a reply; endReply() closes it. mutter() rides the same path as a one-shot quiet aside.
@@ -775,21 +859,19 @@ const Voice = (() => {
     if (!speakReplies) return;
     if (voiceId) activeVoiceId = voiceId;
     opts = opts || {};
+    if (opts.replyToken != null && opts.replyToken !== speakSeq) return;
     const clean = speakable(text);
     let body = opts.mutter ? clean.slice(0, 80) : clean;
     if (!body.trim()) return;
-    const opening = (jobs.length === 0);   // FIRST chunk of this reply → eligible for the fast-path lead split
+    const opening = (jobs.length === 0);
+    if (opening) replyNumber++;
+    if (opening && interruptionMessage) showInterruption(''); // a new reply gets a fresh outcome
+    const agentId = String(opts.agentId || currentAgentId());
+    if (!replyVoice || replyVoice.agentId !== agentId) replyVoice = speechVoice(agentId);
     if (!opts.mutter) coordinatorEvent('onAssistant', { text: body, opening });
     replyClosed = false; draining = true;
-    // on the opening chunk, peel a short lead so the first synth call (and thus first audio) is fast.
-    let pieces;
-    if (opening && !opts.mutter) {
-      const [lead, rest] = firstClauseSplit(body);
-      pieces = rest ? [lead].concat(splitForTts(rest, TTS_CHUNK_MAX)) : splitForTts(lead, TTS_CHUNK_MAX);
-    } else {
-      pieces = splitForTts(body, TTS_CHUNK_MAX);
-    }
-    for (const seg of pieces) { if (seg && seg.trim()) jobs.push({ text: seg, opts, seq: speakSeq, result: null, ac: null }); }
+    const pieces = splitForTts(body, TTS_CHUNK_MAX);
+    for (const seg of pieces) { if (seg && seg.trim()) jobs.push({ text: seg, opts, voice: replyVoice, seq: speakSeq, queuedAt: Date.now(), result: null, ac: null }); }
     pumpSynth(); pumpPlay();
   }
   // signal end-of-reply; the heartbeat (default: re-arm the hands-free loop) fires once the LAST chunk ends.
@@ -804,7 +886,8 @@ const Voice = (() => {
 
   // tear everything down NOW: invalidate in-flight work, abort fetches, cut audio.
   // Used by barge-in, mute, voice-mode-off, and DISCONNECT — the agent must go silent immediately.
-  function stopSpeaking() {
+  function stopSpeaking(reason, details) {
+    if (draining || speaking || reason === 'microphone_activity') recordSpeechEvent(reason || 'explicit_stop', details);
     speakSeq++;
     for (const j of jobs) { if (j.ac) { try { j.ac.abort(); } catch (_) {} } }
     if (ttsAbort) { try { ttsAbort.abort(); } catch (_) {} ttsAbort = null; }
@@ -834,6 +917,12 @@ const Voice = (() => {
   function ambientLine(fallback) {
     try {
       const p = (typeof Personas !== 'undefined' && Personas.get) ? Personas.get(activePersonaId) : null;
+      if (p && Personas.ambient) {
+        const a = typeof App !== 'undefined' && App.currentAgent ? App.currentAgent() : null;
+        const matches = a && Personas.resolve(a.personaId) === Personas.resolve(activePersonaId);
+        const lines = Personas.ambient(activePersonaId, matches ? a.voiceTraits : null, matches ? a.customVoice : '');
+        return lines.length ? lines[(Math.random() * lines.length) | 0] : '';
+      }
       if (p && p.ambientLines && p.ambientLines.length && Math.random() < 0.65) return p.ambientLines[(Math.random() * p.ambientLines.length) | 0];
     } catch (_) {}
     return (fallback && fallback.length) ? fallback[(Math.random() * fallback.length) | 0] : '';
@@ -872,11 +961,11 @@ const Voice = (() => {
   }
   function maybeRearm() {
     if (!convoMode || !canListen() || rearmTimer) return;
-    if (busyNow() || listening || talking()) return;   // not ready — a finishing event re-calls this
+    if ((busyNow() && !coordinator) || coordinatorPaused || listening || talking()) return;
     const delay = REARM_DELAY;   // neural <audio> stops cleanly → a short echo guard is enough
     rearmTimer = setTimeout(() => {
       rearmTimer = null;
-      if (convoMode && !busyNow() && !listening && !talking()) startListening();
+      if (convoMode && (!busyNow() || coordinator) && !coordinatorPaused && !listening && !talking()) startListening();
     }, delay);
   }
 
@@ -922,6 +1011,7 @@ const Voice = (() => {
   // a silent listen in voice mode: try again a few times, then go passive so the mic isn't hot forever.
   function handleEmptyListen() {
     emptyStreak++;
+    if (coordinator && !pendingDiag) { maybeRearm(); return; }
     // Hands-free gave up after three "empty" listens without ever naming why. If those listens failed for a
     // REASON (a 403 after a respawn, a provider 500), say that instead of implying nobody spoke.
     if (emptyStreak >= MAX_EMPTY) { emptyStreak = 0; setStatus(takeDiag() || 'voice mode — tap 🎤 when ready'); return; }
@@ -1036,11 +1126,12 @@ const Voice = (() => {
   const recorderProvider = (() => {
     let stream = null, mr = null, chunks = [], ac = null;
     let pcmProcessor = null, pcmSink = null, pcmFrames = [], pcmSamples = 0, pcmRate = 0, takeSttMode = 'cloud';
+    let continuous = null, finalRecognizer = null;
     let previewPending = false, previewAbort = null, previewSeq = 0, previewLastAt = 0;
     let cb = null, mime = '';
     let aborted = false, delivered = false, hardCapTimer = null;
-    const LOCAL_PREVIEW_MIN_MS = 650;
-    const LOCAL_PREVIEW_INTERVAL_MS = 900;
+    const LOCAL_PREVIEW_MIN_MS = 400;
+    const LOCAL_PREVIEW_INTERVAL_MS = 650;
 
     function pickMime() {
       const prefs = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
@@ -1082,10 +1173,10 @@ const Voice = (() => {
       }
       return output;
     }
-    async function transcribeLocalFrames(frames, signal) {
-      const pcm = mono16k(frames, pcmRate || 48000);
+    async function transcribeLocalFrames(frames, signal, mode = 'local', rate = pcmRate || 48000) {
+      const pcm = mono16k(frames, rate);
       if (!pcm.length) return { text: '', reason: 'local microphone capture produced no audio', failed: true };
-      const r = await fetch('/api/local-voice/transcribe', {
+      const r = await fetch(mode === 'native' ? '/api/stt/native' : '/api/local-voice/transcribe', {
         method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: pcm.buffer, signal
       });
       const j = await r.json().catch(() => ({}));
@@ -1093,9 +1184,18 @@ const Voice = (() => {
       return { text: String((j && j.text) || ''), reason: j && (j.error || j.reason) };
     }
     async function transcribeLocalPcm() {
-      const frames = pcmFrames.slice();
+      const recognizer = continuous; continuous = null; finalRecognizer = recognizer;
+      const frames = pcmFrames.slice(), rate = pcmRate || 48000, seq = previewSeq;
       pcmFrames = []; pcmSamples = 0;
-      return transcribeLocalFrames(frames);
+      try {
+        if (recognizer) {
+          try { if (!recognizer.failed) return await recognizer.finish(); }
+          catch (_) { /* Retain the original capture for the recorded fallback. */ }
+          recognizer.cancel();
+        }
+        if (aborted || seq !== previewSeq) return {text:''};
+        return await transcribeLocalFrames(frames, undefined, 'local', rate);
+      } finally { if (finalRecognizer === recognizer) finalRecognizer = null; }
     }
     async function transcribeNativePcm() {
       const pcm = mono16k(pcmFrames.slice(), pcmRate || 48000);
@@ -1113,7 +1213,9 @@ const Voice = (() => {
       return { text: String((j && j.text) || ''), reason: j && (j.error || j.reason) };
     }
     function requestLocalPreview() {
-      if (takeSttMode !== 'local' || previewPending || delivered || aborted || !cb || !cb.onInterim) return;
+      if (continuous && !continuous.failed) return;
+      const previewMode = takeSttMode === 'local' || takeSttMode === 'native' ? takeSttMode : classicPreviewMode;
+      if (!previewMode || previewPending || delivered || aborted || !cb || !cb.onInterim) return;
       const capturedMs = pcmSamples / Math.max(1, pcmRate || 48000) * 1000;
       const now = Date.now();
       if (capturedMs < LOCAL_PREVIEW_MIN_MS || (previewLastAt && now - previewLastAt < LOCAL_PREVIEW_INTERVAL_MS)) return;
@@ -1122,14 +1224,13 @@ const Voice = (() => {
       const seq = previewSeq;
       const ac = new AbortController();
       previewAbort = ac;
-      transcribeLocalFrames(pcmFrames.slice(), ac.signal).then(({ text }) => {
+      transcribeLocalFrames(pcmFrames.slice(), ac.signal, previewMode).then(({ text }) => {
         if (!text || ac.signal.aborted || seq !== previewSeq || delivered || aborted) return;
         cb && cb.onInterim && cb.onInterim(String(text).trim());
       }).catch(error => {
         if (!error || error.name !== 'AbortError') console.warn('[voice] local preview failed:', (error && error.message) || error);
       }).finally(() => {
-        if (previewAbort === ac) previewAbort = null;
-        previewPending = false;
+        if (previewAbort === ac) { previewAbort = null; previewPending = false; }
       });
     }
     async function transcribe(blob) {
@@ -1137,6 +1238,7 @@ const Voice = (() => {
       // its container bytes guarantees an honest but useless "local engine needs wav" response. Capture PCM
       // from the same stream and use the local endpoint only when the sidecar proved that is the selected leg.
       if (takeSttMode === 'local') return transcribeLocalPcm();
+      if (continuous) { continuous.cancel(); continuous = null; }
       if (takeSttMode === 'native') return transcribeNativePcm();
       const fmt = fmtFromMime(mime || blob.type || '');
       // desktop: apiKey() is '' (key is in the sidecar env) — send it as a header when we DO have one (browser).
@@ -1171,7 +1273,9 @@ const Voice = (() => {
             ? new Blob([new Uint8Array(1)], { type: 'audio/wav' }) : null);
       chunks = [];
       if (aborted || !blob || !blob.size) { cb && cb.onEnd && cb.onEnd(); return; }
+      const seq = previewSeq;
       transcribe(blob).then(({ text, reason }) => {
+        if (seq !== previewSeq) return;
         if (aborted) { cb && cb.onEnd && cb.onEnd(); return; }
         // setDiagStatus, not setStatus: cb.onEnd() below runs endListening() in this same synchronous block
         // and its restore would otherwise repaint 'online' over this before a single frame is drawn.
@@ -1179,15 +1283,19 @@ const Voice = (() => {
         cb && cb.onFinal && cb.onFinal(String(text || '').trim());
         cb && cb.onEnd && cb.onEnd();
       }).catch(e => {
+        if (seq !== previewSeq || aborted) return;
         console.warn('[voice] STT post failed:', (e && e.message) || e);
         cb && cb.onError && cb.onError('stt-failed');
         cb && cb.onEnd && cb.onEnd();
       });
     }
     async function start(cbs) {
+      if (continuous) continuous.cancel(); continuous = null;
+      if (finalRecognizer) finalRecognizer.cancel(); finalRecognizer = null;
       cb = cbs; chunks = []; pcmFrames = []; pcmSamples = 0; pcmRate = 0; takeSttMode = classicSttMode;
       previewSeq++; previewPending = false; previewAbort = null; previewLastAt = 0;
       aborted = false; delivered = false;
+      if (takeSttMode === 'local' || classicPreviewMode === 'local') fetch('/api/local-voice/warm?tts=0', {method:'POST'}).catch(() => {});
       try {
         // DEAD-BUTTON GUARD: getUserMedia can hang forever if the mic-permission prompt is DISMISSED (not
         // answered) — WebView2 and some browsers never settle the promise. Without a ceiling, `listening`
@@ -1230,11 +1338,18 @@ const Voice = (() => {
               if (samples && samples.length) {
                 pcmFrames.push(new Float32Array(samples));
                 pcmSamples += samples.length;
+                if (continuous) continuous.push(pcmFrames[pcmFrames.length - 1]);
                 requestLocalPreview();
               }
             };
             src.connect(pcmProcessor); pcmProcessor.connect(pcmSink); pcmSink.connect(ac.destination);
             pcmRate = ac.sampleRate || 48000;
+            if (typeof VoiceStream !== 'undefined' && (takeSttMode === 'local' || classicPreviewMode === 'local')) {
+              const seq = previewSeq;
+              continuous = VoiceStream.open({rate: pcmRate, onUpdate: update => {
+                if (seq === previewSeq && !delivered && !aborted && update.text) cb && cb.onInterim && cb.onInterim(update.text);
+              }});
+            }
           }
         } catch (_) { ac = null; }
         mr.start();
@@ -1250,10 +1365,12 @@ const Voice = (() => {
     }
     function abort() {   // hard stop, discard (teardown / barge-in)
       aborted = true;
+      if (finalRecognizer) finalRecognizer.cancel(); finalRecognizer = null;
+      if (continuous) continuous.cancel(); continuous = null;
       if (mr && mr.state !== 'inactive') { try { mr.stop(); } catch (_) {} }
       teardownAudio();
       // deliver an onEnd so endListening() runs its teardown branch; onFinal is suppressed by `aborted`.
-      if (!delivered) { delivered = true; cb && cb.onEnd && cb.onEnd(); }
+      delivered = true; cb && cb.onEnd && cb.onEnd();
     }
     return { name: 'recorder', start, stop, abort };
   })();
@@ -1261,27 +1378,33 @@ const Voice = (() => {
   // OAuth Live fallback for embedded Windows WebView2, which has MediaRecorder but no SpeechRecognition.
   // The local sidecar invokes the OS dictation engine against the default mic; no cloud speech key is used.
   const nativeSpeechProvider = (() => {
-    let ac = null, hooks = null;
+    let take = null;
     async function start(h) {
-      hooks = h; ac = new AbortController();
+      const current = { hooks: h, ac: new AbortController() };
+      take = current;
       try {
-        const r = await fetch('/api/stt/native', { method: 'POST', signal: ac.signal });
+        const r = await fetch('/api/stt/native', { method: 'POST', signal: current.ac.signal });
         const j = await r.json().catch(() => ({}));
+        if (take !== current) return;
+        const hooks = current.hooks;
         if (!r.ok || j.error && !j.text) {
           if (j.error === 'no-speech') hooks && hooks.onError && hooks.onError('no-speech');
           else hooks && hooks.onError && hooks.onError('native-unavailable');
         } else if (j.text) hooks && hooks.onFinal && hooks.onFinal(j.text);
       } catch (e) {
-        if (!(e && e.name === 'AbortError')) hooks && hooks.onError && hooks.onError('native-unavailable');
+        if (take === current && !(e && e.name === 'AbortError')) h && h.onError && h.onError('native-unavailable');
       } finally {
-        const done = hooks; hooks = null; ac = null;
-        if (done && done.onEnd) done.onEnd();
+        if (take === current) {
+          take = null;
+          if (h && h.onEnd) h.onEnd();
+        }
       }
     }
     function stop() {
-      const done = hooks; hooks = null;
-      if (ac) { try { ac.abort(); } catch (_) {} ac = null; }
-      if (done && done.onEnd) done.onEnd();
+      const current = take; take = null;
+      if (!current) return;
+      current.ac.abort();
+      if (current.hooks && current.hooks.onEnd) current.hooks.onEnd();
     }
     function abort() { stop(); }
     return { name: 'native', start, stop, abort };
@@ -1296,11 +1419,14 @@ const Voice = (() => {
     (canRecordMic ? recorderProvider : webSpeechProvider);
   let sttProvider = classicSttProvider;
   let classicSttMode = 'cloud';
+  let classicPreviewMode = '';
+  let coordinatorPaused = false;
   let classicProviderReady = !!(forceRecorder || forceWebSpeech);
   let classicProviderProbe = null;
   let startAfterProbe = false;
   function applyClassicSttStatus(status) {
     const preferred = String((status && status.preferred) || '');
+    classicPreviewMode = status && status.local ? 'local' : status && status.native ? 'native' : '';
     if (!forceRecorder && !forceWebSpeech) {
       if (preferred === 'native' && canRecordMic) { classicSttProvider = recorderProvider; classicSttMode = 'native'; }
       else if (preferred === 'native') { classicSttProvider = nativeSpeechProvider; classicSttMode = 'native'; }
@@ -1336,6 +1462,7 @@ const Voice = (() => {
   function busyNow() { return typeof Chat !== 'undefined' && Chat.isBusy && Chat.isBusy(); }
 
   function startListening() {
+    if (coordinatorPaused) return;
     // init probes the sidecar in the background. If the first click wins that race, preserve the click and
     // begin as soon as the truthful provider snapshot arrives instead of guessing from WebView browser APIs.
     if (!coordinator && !classicProviderReady && classicProviderProbe) {
@@ -1377,7 +1504,7 @@ const Voice = (() => {
           listening = false; setMicState(false);
           clearTimeout(rearmTimer); rearmTimer = null;
           stopConvo();
-          setStatus('mic blocked — allow microphone access in your browser, then click 🎤');
+          setStatus(microphoneHelp());
           return;
         }
         endListening();
@@ -1404,6 +1531,7 @@ const Voice = (() => {
     // before the failure existed, so it can never carry it.
     if (!busyNow() && !speaking) setStatus(takeDiag() || savedStatus || (convoMode ? 'voice mode on' : 'online'));
     coordinatorEvent('onState', busyNow() ? 'thinking' : 'ready');
+    if (coordinator && convoMode) maybeRearm();
   }
 
   // a final transcript from the mic — sent exactly like a typed message (busy/purpose/task/cost logic
@@ -1445,7 +1573,7 @@ const Voice = (() => {
     if (!coordinator && startAfterProbe && !listening) { startAfterProbe = false; setStatus('online'); return; }
     // barge-in: interrupt whenever the agent is making OR about to make sound (talking() also covers the
     // neural-fetch gap, where `speaking` is still false but a reply is imminent) — stopSpeaking aborts it.
-    if (talking()) { stopSpeaking(); setTimeout(() => { if (!busyNow() && !listening) startListening(); }, 150); return; }
+    if (talking()) { stopSpeaking('microphone_button'); setTimeout(() => { if (!busyNow() && !listening) startListening(); }, 150); return; }
     if (convoMode) { if (!listening && !busyNow()) startListening(); return; }
     if (listening) stopListening(); else startListening();
   }
@@ -1466,9 +1594,19 @@ const Voice = (() => {
     return true;
   }
   function stopCoordinator() {
+    coordinatorPaused = false;
     if (convoMode) stopConvo();
     coordinator = null;
     sttProvider = classicSttProvider;
+  }
+  function pauseCoordinator() {
+    coordinatorPaused = true;
+    clearTimeout(rearmTimer); rearmTimer = null;
+    if (listening) { discarding = true; sttProvider.abort(); listening = false; setMicState(false); }
+  }
+  function resumeCoordinator() {
+    coordinatorPaused = false;
+    if (coordinator && convoMode && !listening) startListening();
   }
   // The downloaded local speech surface owns its persistent microphone/VAD loop, but still needs the mature
   // reply-stream hooks (captions, speaking state, barge-in) from this module.
@@ -1507,8 +1645,8 @@ const Voice = (() => {
        escape the fbMsg machinery exists to prevent. Every path that legitimately clears the reason calls
        clearNeuralCold()/noteNeuralOk() first, which empty fbMsg; init() did not, and it runs on agent focus,
        persona change and dossier apply. Guarding here covers every caller instead of one. */
-    toggleBtn.title = (speakReplies && fbMsg) ? fbMsg
-      : (speakReplies ? 'agent voice: ON — click to mute' : 'agent voice: OFF — click to unmute');
+    toggleBtn.title = (interruptionMessage ? interruptionMessage + ' ' : '') + ((speakReplies && fbMsg) ? fbMsg
+      : (speakReplies ? 'agent voice: ON — click to mute' : 'agent voice: OFF — click to unmute'));
     toggleBtn.setAttribute('aria-pressed', speakReplies ? 'true' : 'false');
     toggleBtn.setAttribute('aria-label', speakReplies ? 'Agent voice: on, click to mute' : 'Agent voice: off, click to unmute');
   }
@@ -1590,7 +1728,7 @@ const Voice = (() => {
     // which also satisfies the browser mic-permission gesture).
     if (!init._esc) { init._esc = true; document.addEventListener('keydown', e => { if (e.key === 'Escape' && convoMode) { savePref(LS_CONVO, false); stopConvo(); } }); }
     // unlock browser audio on the first user gesture so the agent's voice is never silently swallowed after a reload
-    if (!init._audio) { init._audio = true; ['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, armAudio, { once: true, capture: true })); }
+    if (!init._audio) { init._audio = true; ['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, armAudio, { capture: true })); }
     // were they hands-free last session? the refresh reset it — invite a one-tap resume (skipped during the
     // awakening, which owns the COMMS input). Never auto-starts; the click is the required mic-permission gesture.
     if (opts.resumeCue !== false && canListen() && loadPref(LS_CONVO, false)) showResumeCue();
@@ -1613,12 +1751,14 @@ const Voice = (() => {
   function isOn() { return !!(speakReplies && canSpeak()); }
 
   return {
+    recordSpeechEvent, speechDiagnostics: () => speechDiagnostics.map(event => Object.assign({}, event)),
+    replyToken: () => speakSeq, isReplyPending: () => draining,
     init, speak, speakChunk, endReply, mutter, ambientLine, setAgent, isOn, setSpeakReplies,
     startListening, stopListening, toggleListen, stopSpeaking,
     toggleVoiceMode, stopConvo, onTurnEnd,
-    canListen, canSpeak, startCoordinator, stopCoordinator, attachCoordinator, detachCoordinator,
+    canListen, canSpeak, startCoordinator, stopCoordinator, pauseCoordinator, resumeCoordinator, attachCoordinator, detachCoordinator,
     canOAuthLive: () => !!SR || typeof fetch !== 'undefined', personaId: () => activePersonaId,
-    setLocalTts,
+    setLocalTts, voiceChoice, localVoiceId, setVoiceChoice, currentAgentId, microphoneHelp,
     /* LIVE VOICE MUST ARRIVE AUDIBLE. Opening a hands-free session with the speaker muted is a room where you
        talk and nothing answers — the Commander then has to find a toggle to make the feature work at all.
        Classic voice mode already force-enables the speaker in toggleVoiceMode(); the Local Live panel does not

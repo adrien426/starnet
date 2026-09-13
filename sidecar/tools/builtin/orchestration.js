@@ -22,7 +22,7 @@
 (function (root, factory) {
   const api = factory(
     typeof require === 'function' ? require('../../domain-task.js') : (root.SK && root.SK.domainTask),
-    typeof require === 'function' ? require('../../../shared/schema.js') : (root.SK && root.SK.schema)
+    typeof require === 'function' ? require('../../result-contract.js') : (root.SK && root.SK.resultContract)
   );
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else { root.SK = root.SK || {}; root.SK.tools = root.SK.tools || {}; (root.SK.tools.builtin = root.SK.tools.builtin || {}).orchestration = api; }
@@ -77,41 +77,15 @@
     return '';
   }
 
-  const RESULT_SCHEMA_KEYS = new Set(['type', 'enum', 'properties', 'required', 'items', 'additionalProperties']);
-  const RESULT_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array', 'null']);
   function resultSchemaOf(raw) {
-    if (raw == null) return { ok: true, schema: null };
-    let chars = 0; try { chars = JSON.stringify(raw).length; } catch (_) { return { ok: false, error: 'resultSchema must be JSON' }; }
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || chars > 12000) return { ok: false, error: 'resultSchema must be a bounded JSON object' };
-    let nodes = 0;
-    function walk(s, depth, at) {
-      if (!s || typeof s !== 'object' || Array.isArray(s)) return at + ' must be an object';
-      if (++nodes > 120 || depth > 8) return 'resultSchema is too complex';
-      for (const k of Object.keys(s)) if (!RESULT_SCHEMA_KEYS.has(k)) return at + '.' + k + ' is not a supported schema keyword';
-      if (s.type !== undefined) {
-        const types = Array.isArray(s.type) ? s.type : [s.type];
-        if (!types.length || types.some(t => !RESULT_TYPES.has(t))) return at + '.type contains an unsupported type';
-      }
-      if (s.enum !== undefined && !Array.isArray(s.enum)) return at + '.enum must be an array';
-      if (s.required !== undefined && (!Array.isArray(s.required) || s.required.some(k => typeof k !== 'string'))) return at + '.required must be an array of strings';
-      if (s.properties !== undefined) {
-        if (!s.properties || typeof s.properties !== 'object' || Array.isArray(s.properties)) return at + '.properties must be an object';
-        for (const k of Object.keys(s.properties)) { const e = walk(s.properties[k], depth + 1, at + '.properties.' + k); if (e) return e; }
-      }
-      if (s.items !== undefined) { const e = walk(s.items, depth + 1, at + '.items'); if (e) return e; }
-      if (s.additionalProperties !== undefined && s.additionalProperties !== false) return at + '.additionalProperties may only be false';
-      return '';
-    }
-    const error = walk(raw, 0, '$');
-    return error ? { ok: false, error } : { ok: true, schema: JSON.parse(JSON.stringify(raw)) };
+    if (raw == null) return {ok:true,schema:null};
+    if (!schemaLib) return {ok:false,error:'Result contract validator is unavailable'};
+    return schemaLib.prepare(raw);
   }
-  function inspectStructured(schema, text) {
-    if (!schema) return { ok: true, value: null, errors: [] };
-    let value;
-    try { value = JSON.parse(String(text == null ? '' : text).trim()); }
-    catch (e) { return { ok: false, value: null, errors: ['result is not strict JSON: ' + ((e && e.message) || e)] }; }
-    const checked = schemaLib && typeof schemaLib.validate === 'function' ? schemaLib.validate(schema, value) : { ok: true, errors: [] };
-    return { ok: checked.ok, value: checked.ok ? value : null, errors: checked.errors || [] };
+  function inspectStructured(schema,text) {
+    if (!schema) return {ok:true,value:null,errors:[]};
+    if (!schemaLib) return {ok:false,value:null,errors:['Result contract validator is unavailable']};
+    return schemaLib.inspect(schema,text);
   }
   async function enforceStructured(schema, text, repair) {
     const first = inspectStructured(schema, text);
@@ -145,6 +119,19 @@
       } else seen.set(key, rows.indexOf(row));
     }
     return rows;
+  }
+
+  // Only host context or a durable host-created worker record supplies project scope.
+  // Tool arguments cannot choose a new filesystem root.
+  function projectOptions(ctx, record) {
+    const source = record && Object.prototype.hasOwnProperty.call(record, 'projectRoot') ? record : (ctx || {});
+    return { projectRoot: source.projectRoot || undefined, workdir: source.workdir || source.projectCwd || undefined };
+  }
+
+  function connectorOptions(ctx) {
+    // Functions are supplied by the host context, never by tool arguments or a persisted worker record.
+    const authority = ctx && ctx.connectorAuthority;
+    return authority ? { connectorAuthority: authority, initialTaint: typeof authority.taintedBy === 'function' ? authority.taintedBy() : null } : {};
   }
 
   function makeOrchestrationTools(deps) {
@@ -183,8 +170,9 @@
     }
     function workerSystem(base) {
       const identity = String(base || '') + postureNote();
-      if (!taskContext) return identity;
-      return identity + '\n\n' + taskContext
+      const liveContext = typeof deps.getTaskContext==='function' ? String(deps.getTaskContext() || '') : taskContext;
+      if (!liveContext) return identity;
+      return identity + '\n\n' + liveContext
         + '\n\n[DELEGATED EXECUTION] Treat the task context above as settled input from the Commander. Do not ask the Commander another discovery question. If a truly blocking gap remains, report that gap to the lead agent.';
     }
     /* LEAD CONTEXT HANDOFF (G6 closure). A worker's opening message was ONLY the prompt string: whatever the
@@ -462,6 +450,7 @@
           noteSessionActivity('station.dispatch_start', job, workerRunId);
           try {
             result = await runOnce({
+              ...projectOptions(ctx), ...connectorOptions(ctx),
               key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
               // Class Loadouts S1: the WORKER runs at its OWN class-applied reasoning effort (roster record), not the
               // lead's — a dispatched specialist honors its loadout. Falls back to the lead's effort when unset.
@@ -512,6 +501,8 @@
             if (perWorker > 0 && remaining <= 0) return null;
             const repairRunId = newId();
             const repair = await runOnce({
+              outputOnly: true,
+              ...projectOptions(ctx), ...connectorOptions(ctx),
               key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
               reasoningEffort: (job.ident && job.ident.reasoningEffort) || reasoningEffort,
               model: wire.model, system: workerSystem((job.ident && job.ident.system) || ''),
@@ -573,7 +564,7 @@
           if (!subagents || typeof subagents.start !== 'function') return { content: 'background subagents unavailable (no subagent manager)', summary: 'error' };
           const started = jobs.map(job => {
             if (job.error) return { agentId: job.agentId, reason: 'error', result: job.error };
-            return subagents.start({ leadId, agentId: job.agentId, prompt: job.prompt, context: job.context, runId: newId(), resultSchema: job.resultSchema }, async (h) => {
+            return subagents.start({ ...projectOptions(ctx), leadId, agentId: job.agentId, prompt: job.prompt, context: job.context, runId: newId(), resultSchema: job.resultSchema }, async (h) => {
               const r = await runWorker(job, { runId: h.runId, signal: h.signal, emit: h.emit, steer: h.steer });
               return { status: r.reason === 'done' ? 'done' : 'error', reason: r.reason, result: r.result, usd: r.usd || 0,
                 structuredResult: r.structuredResult, validation: r.validation, repairRunId: r.repairRunId, artifacts: r.artifacts };
@@ -717,6 +708,7 @@
             const contractedPrompt = openingMessage(prompt, task.context, task.resultSchema);
             try {
               result = await runOnce({
+              ...projectOptions(ctx), ...connectorOptions(ctx),
                 key, provider, baseUrl, reasoningEffort, model,      // the lead's OWN model - a clone of self
                 system: workerSystem(selfSystem),           // the lead's OWN identity plus settled task context
                                                             // composes its own caps for its (narrowed) toolset
@@ -749,6 +741,8 @@
               if (perWorker > 0 && remaining <= 0) return null;
               const repairRunId = newId();
               const repair = await runOnce({
+              outputOnly: true,
+              ...projectOptions(ctx), ...connectorOptions(ctx),
                 key, provider, baseUrl, reasoningEffort, model, system: workerSystem(selfSystem),
                 messages: [{ role: 'user', content: contractedPrompt }, { role: 'assistant', content: firstText },
                   { role: 'user', content: '[STRUCTURED RESULT REPAIR] The prior result failed host validation:\n- ' + errors.slice(0, 20).join('\n- ') + '\nReturn ONLY strict JSON matching: ' + JSON.stringify(task.resultSchema) }],
@@ -778,7 +772,7 @@
             return { status: r.reason === 'done' ? 'done' : 'error', reason: r.reason, result: r.result, usd: r.usd,
               structuredResult: r.structuredResult, validation: r.validation, repairRunId: r.repairRunId, artifacts: r.artifacts };
           };
-          const view = subagents.start({ leadId, agentId: ephemeralId, prompt: prompt, context: task.context, runId: newId(), resultSchema: task.resultSchema }, runner);
+          const view = subagents.start({ ...projectOptions(ctx), leadId, agentId: ephemeralId, prompt: prompt, context: task.context, runId: newId(), resultSchema: task.resultSchema }, runner);
           return { label, view, done, started: true };
         };
 
@@ -896,6 +890,7 @@
         const contractedPrompt = openingMessage(rec.prompt || '', handoffContext(rec.context), rec.resultSchema);
         try {
           result = await runOnce({
+            ...projectOptions(ctx, rec), ...connectorOptions(ctx),
             key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
             reasoningEffort: (ident && ident.reasoningEffort) || reasoningEffort,   // Class Loadouts S1: worker's own class effort (see runWorker)
             model: wire.model,
@@ -923,6 +918,8 @@
           if (perWorker > 0 && remaining <= 0) return null;
           const repairRunId = newId();
           const repair = await runOnce({
+              outputOnly: true,
+            ...projectOptions(ctx, rec), ...connectorOptions(ctx),
             key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
             reasoningEffort: (ident && ident.reasoningEffort) || reasoningEffort,
             model: wire.model, system: workerSystem((ident && ident.system) || ''),

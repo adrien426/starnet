@@ -1,21 +1,107 @@
-# StarNet v0.10.13
+# StarNet v0.11.2
 
-- **LINES is now a real automation library.** The shelf grows to 19 pre-wired systems, from simple front desks and revision loops to research swarms, multi-stage foundries, load-balanced crews, two-door intake, verdict-gated quality loops, and an escalation lane for work that exhausts its revision budget. Every shipped line is compiled from the same floor mechanics it renders.
-- **StarNet can surface useful work already hiding in your projects.** The new **FOUND ON YOUR PROJECTS** shelf scans only roots you explicitly blessed, cites the exact local evidence behind each card, and lets you hand a finding to a crew member. Discovery is pause-aware, records its decisions, never grants itself a new project, and never starts work without your action.
-- **Recommendations now learn from the station's actual track record.** Recent completed runs fold into support-gated outcome patterns used by recommendations, quests, and Night Shift. The Insights API exposes the same literal evidence counts, while sparse history remains a weak prior rather than a confident claim.
-- **The connector catalog adds 18 live-probed OAuth services plus keyless OpenAI DevDocs.** New rows cover Todoist, ClickUp, Railway, Grafana, PostHog, Cloudflare Bindings, Cal.com, Fireflies, Algolia, Buildkite, Datadog, Globalping, Honeybadger, Jam, Sanity, Semgrep, Close CRM, and Ramp.
-- **The KEYS directory adds 23 specialized platforms.** StarNet now has guided entries for Supliful, Fourthwall, ShineOn, SPOD, Teemill, Zazzle, Gumroad, Lemon Squeezy, CJ Dropshipping, Keepa, Discogs, Lob, Lulu, Duffel, Porkbun, ElevenLabs, HeyGen, Bannerbear, Shotstack, Bland, Vapi, DeepL, and Transistor.
-- **Bring-your-own-key runs no longer depend on StarNet credits.** A linked station using its own Gemini, custom, or other provider key bypasses managed-credit admission and is never charged against the StarNet wallet. Managed relay runs remain credit-gated.
-- **Ollama gets a realistic cold-start window.** Local models can take longer than 30 seconds to load without StarNet treating the startup as a dead provider.
-- **Routines and schedules are substantially harder to wedge or misreport.** This update covers one-shot re-arming, run-now leases, pause/delete cancellation, retry anchors, zombie settlement, daylight-saving gaps, backward clock changes, malformed schedules, sparse-date search stalls, and truthful running/finished controls.
-- **Recovery and persistence now fail closed across more of the station.** Durable writes, backups, checkpoints, cloud saves, roster changes, skill installs, permission imports, credential removal, OAuth logout, rotated tokens, attachments, outbox progress, process receipts, and workspace ownership all preserve or roll back the last proven state when a write or read-back fails.
-- **Damaged orphan backups no longer wedge a store forever.** When a main store file is absent and its `.bak` is empty or corrupt, StarNet quarantines the actual damaged generation, preserves it for diagnosis, and can initialize the key again in the same operation.
-- **Rejected skill turn-ins stay available to retry.** A KEEP or EDIT choice is consumed only after the learned skill is verified on disk, so a full disk no longer drops the proposal or turns the route into a generic server error.
-- **Browser login teardown now fails safely.** If a headed login browser cannot be closed and restored cleanly, browser actions stop for that run instead of reusing or replacing it with an unshimmed visible driver.
-- **Starting a new Commander is genuinely fresh.** The saved tutorial completion marker is cleared and the tour, coachmarks, and FIRST STEPS guidance are re-armed.
-- **The unreachable-station screen is useful in a screenshot.** It distinguishes a stale-window refusal (`SAVE-403`) from a lost save request (`SAVE-NET`), offers copyable recovery details, and the connect screen includes an in-app path to use a different StarNet account.
-- **Provider and tool-call recovery is more consistent.** Gemini 3 thought signatures survive replay, Gemini usage arrives before completion, parallel OpenAI-compatible tool calls keep their identities, durable tool results resume after interruption, verification reads finish cleanly, and output limits no longer expand while trying to explain truncation.
-- **Messaging and process cleanup are more resilient.** Discord reconnects back off instead of storming, partial outbound deliveries retain exact progress across restart, outbox IDs stay unique, process-tree cleanup is bounded on Windows and group-aware on POSIX, and browser/profile teardown is awaited before reuse.
-- **Several small but painful UI races are gone.** Stage dragging releases on lost focus, background refreshes preserve drafts and form state, minimized windows are not re-measured, closed panels stop polling, destructive confirmations fire once, and create buttons cannot double-mint paid loops or routines.
+Released September 11, 2026. This update expands agent personality and setup, refreshes the station's worlds and walking animations, improves report readability, and repairs save, provider, delegation, graphics and desktop-update behavior.
 
-This is a feature-rich reliability update rather than a focused hotfix.
+These notes cover the changes shipped since **0.11.1**, including the final CRT static controls and Windows pointer repair.
+
+## Station visuals and performance
+
+- **Six rebuilt backdrops:** THE NURSERY gains layered gas clouds, filaments, dust and twinkling cores; NIGHT CITY gains a lit street grid, building windows, rivers, bridges and beacons; OCEAN gains stepped waves, crest lines, reflections and pixel clouds; THE BELT gains detailed small asteroids and dust; THE MOON gains richer regolith, crater rims, ejecta and rocks; FOREST gains a dark aerial canopy, conifers, undergrowth, forest-floor detail and a river.
+- **Backdrop lag repair:** heavy sky artwork is generated in a background worker, keeping the interface responsive while the scene is prepared. Ground scenery is cached rather than repainting every overlapping tree on every frame.
+- **Smoother camera movement:** the ground cache moves with the camera and refreshes when zoom, window size or station footprint changes. Superseded artwork requests are discarded, with a compatibility path for environments without workers.
+- **Adjustable CRT static:** Appearance settings now let you change and save static strength. The default remains 100%, preserving the existing look for stations that have not changed it.
+- **Smoother walking animations:** expanded walk cycles add intermediate frames across agent skins, with turning cadence adjusted to preserve natural foot motion. Turtle rear-facing frames and wizard staff continuity receive specific corrections.
+- **More consistent glass styling:** task-understanding, noticed/recommendation, away-work, decision and other transient cards now match the station interface. Station announcements are more readable, and compact recommendation labels remain compact.
+- **Panel sizing stays saved:** docked panel height survives close/reopen and reload, with appropriate handling for maximized panels and smaller windows.
+
+## Overseer creation and agent personalities
+
+- **Rebuilt Overseer setup:** a full-screen, two-step identity-and-connection flow brings the character gallery, name, personality, working style, provider, model and reasoning controls together.
+- **Clearer connection choices:** StarNet account setup has a prominent branded action; alternative providers use recognizable local logos. Model selection supports keyboard navigation, custom endpoints and saved reasoning choices.
+- **Six distinct personality presets:** Composed, Warm, Blunt, Dry, Unhinged and Upbeat now define more consistent behavior in conversation, disagreement, uncertainty, failures and successful work.
+- **Detailed personality tuning:** adjust warmth, humor, formality, answer length and energy; choose no, occasional or frequent profanity; control emoji and directness; or write a custom communication style. Personality tuning is separate from the audible voice.
+- **Visible saved overrides:** customized personalities are labeled, tuning survives preset changes, and Reset to Preset clears overrides. Older personality names map to the new presets. Unhinged's language choice retains an explicit confirmation.
+- **More reliable setup navigation:** going back preserves identity, appearance and connection entries. Replaying the tutorial preserves the current agent name. Narrow-window layout fixes prevent character and identity sections from overlapping.
+- **Clearer setup recovery:** stale provider-specific warnings and buttons retire when the connection, agent or missing setup step changes. A connected station without a model shows CHOOSE MODEL and opens the picker instead of asking for an unrelated API key. Recovery buttons work with both mouse and keyboard.
+
+## Providers, connections and discovery
+
+- **GitHub device sign-in:** connect GitHub through its device authorization flow, with a visible code, expiry/cancellation handling and useful sign-in errors. Small windows keep the code accessible. If saving a new token fails, the existing connection is preserved.
+- **Discover improvements:** popular platforms are easier to find, with clearer guidance into each platform's connection setup.
+- **Field Manual connection guide:** work-app connections and messaging channels have dedicated setup guidance and navigation to the relevant panel.
+- **Provider presentation:** refreshed provider logos, aligned connection statuses and clearer StarNet account actions make connection choices easier to scan.
+- **Model-selection race fixed:** an older model-catalog response can no longer overwrite a newer provider or model choice, including overlapping picker requests and agent changes.
+- **Codex-to-OpenRouter fallback fixed:** saved fallback choices now switch the provider route and credential source correctly when Codex reaches its quota. Paid fallback work retains its configured spending limits and cost record. Addresses [issue #12](https://github.com/androoAGI/starnet/issues/12).
+- **Claude continuation fixed:** verification reminders and later host notes retain their proper place in the conversation on OpenRouter and compatible managed connections, avoiding the unsupported assistant-prefill request that could interrupt a task with HTTP 400.
+- **Delegated connector access fixed:** specialists retain access to connected MCP tools through the lead agent's live approval flow, including dispatched, spawned and resumed work. Denials, connector removal and renewed confirmation after external content still apply. Addresses [issue #13](https://github.com/androoAGI/starnet/issues/13).
+
+## Saves, conversations and recovery
+
+- **Concurrent-save protection:** stale clients cannot silently overwrite newer station edits. Conflicting local changes are retained for recovery, including edits made while conflict recovery is already open.
+- **Startup recovery:** an unsynced local cache no longer prevents startup. Save-recovery actions use the station's own controls and retain the local recovery path.
+- **Queued-save restart repair:** completed queued writes now retain the server's acknowledged revision, preventing false conflicts when the station restarts or updates.
+- **Conversation conversion preserves attachments:** converting a direct conversation to a group retains historical attachment references and snapshots the required files before committing. If an attachment cannot be read, the original conversation remains intact.
+- **Conversion retries are safe:** retrying the same conversion returns the existing result; a different request cannot accidentally reuse the earlier conversion's identity.
+- **Duplicate restored replies fixed:** reopening a completed conversation reconciles locally combined streaming text with its durable turns instead of displaying both. Uncommitted text, attachments and stopped/error markers remain available.
+- **Loop review isolation:** reviewing or undoing a loop iteration is protected against simultaneous execution, another review, or changes to the same loop, including while Git undo is still running.
+
+## COMMS, reports and task feedback
+
+- **Structured reports in COMMS:** tables, ordered and nested lists, quotations and named links now render alongside headings, emphasis and fenced code.
+- **Readable narrow reports:** wide tables stay within their own scrolling area, and table text remains readable at narrower panel widths.
+- **Exact report copying:** copying a message preserves its original report text and Markdown; code-block copying retains its separate behavior.
+- **List-format fixes:** plus-sign bullets and tab-separated list markers now render consistently during normal report display and restored history.
+- **Clear failed-session marker:** failed sessions use a flashing X without repeating the same failure label beside it.
+- **Truthful partial results:** failed or interrupted tasks retain the text, usage and evidence already produced instead of being presented as successfully completed work.
+
+## Crew movement, furniture and station behavior
+
+- **Doorway routing repaired:** agent footsteps follow traversable doorway paths instead of cutting through adjacent walls or floor boundaries.
+- **Continuous movement and facing:** waypoint transitions remain continuous, and look-back facing is held correctly instead of snapping prematurely.
+- **Unreachable desk recovery:** agents wait in place while real work remains active, retry routes and recover when a refit restores access. Moving a desk no longer teleports the Overseer to it.
+- **Correct desk-facing poses:** seated crew face their desk, using an appropriate directional pose when a skin lacks matching typing art. Working agents without a seat remain standing.
+- **Furniture cleanup:** moving, rotating or deleting furniture releases stale seating claims, offsets and leisure references. Unchanged couches keep their occupants when the station origin shifts.
+- **Retired crew releases seats:** removing plan-derived crew frees its furniture reservation so another agent can use the seat.
+- **Room deletion stays coherent:** intersecting furniture and belt tiles are removed in the same undo snapshot, while neighboring furniture and logical agent links are retained. Undo, redo and reload preserve the intended result.
+- **Approval waits are visible:** crew awaiting permission stand with the waiting-for-approval state and suppress work effects. Matching responses, concurrent prompts and terminal events clear the correct wait.
+
+## Images, usage and speech
+
+- **Image costs reach run receipts:** actual image charges are included in local usage and completed-run costs without charging a second time.
+- **Image cancellation stops publication:** cancellation propagates through generation, download and processing so a later result cannot publish a file after cancellation. Upstream work that has already been billed can still incur a charge.
+- **Clearer image setup guidance:** BYOK users are shown the supported OpenRouter credential route, instead of only being told to connect a paid StarNet account.
+- **Image cleanup diagnostics:** unexpected failures while cleaning staged image files are reported rather than silently hidden.
+- **Speech output recovery:** live speech playback recovers after an output-device interruption.
+
+## API and automation reliability
+
+- **Durable chat-completion retries:** compatible clients can send Idempotency-Key to reserve work before execution. Matching concurrent requests share the same run, and completed responses can be replayed after restart without repeating the work.
+- **Explicit retry conflicts:** reusing a key with different request content or model configuration returns a conflict. An interrupted reservation without a durable result also returns a conflict rather than silently repeating possible side effects. Disconnecting one waiting client does not cancel shared keyed work.
+- **Retryable admission and streaming:** pre-dispatch concurrency rejection remains retryable, streaming retries preserve their original run, and listener failures produce diagnostics.
+- **Honest API outcomes:** responses expose native completion status, reason, partial output, errors and usage. Cancellation, output limits, missing terminal events and provider failures no longer masquerade as successful completion.
+- **Validated JSON responses:** json_object and json_schema results are validated as complete JSON. A failed result gets at most one output-only repair, which cannot execute tools or repeat task side effects; usage includes both calls.
+- **Safer result contracts:** validation supports bounded schema constraints and local references across API and delegated result paths. Unsupported schemas, recursive/remote references and excessive validation work are rejected explicitly.
+- **Paused-routine lifecycle fixed:** paused routines no longer count as armed background work or keep an otherwise idle station running after its window closes.
+
+API scope: keyed retry protection applies to /v1/chat/completions, not /v1/runs creation. Structured JSON currently requires stream: false; structured streaming is rejected before work starts. Completed retry records become eligible for cleanup after 24 hours. See the [API documentation](https://github.com/androoAGI/starnet/blob/v0.11.2/docs/OPENAI_COMPAT.md) for the full contract.
+
+## Desktop, installation and diagnostics
+
+- **Windows pointer actions repaired:** move, click, double-click and drag now invoke the intended pointer implementation instead of failing through PowerShell's filesystem-move alias.
+- **Consistent installed version reporting:** the desktop shell supplies its actual package version to the local runtime during startup and recovery, keeping installed-app identity and update checks aligned.
+- **Linux build packaging repaired:** incompatible musl image binaries and unused GPU accelerator plugins are excluded from the relevant desktop staging paths while required CPU libraries remain. This is a packaging repair; this release's public downloads are Windows, Apple Silicon Mac and Intel Mac.
+- **Safer diagnostic logs:** failure-warning tags and messages redact credential-shaped content before logging.
+- **Website demo parity:** the corresponding interface, artwork and behavior changes are synchronized into the website's app mirror.
+
+## Installation and release verification
+
+- Signed Windows installation and both notarized Mac builds passed the release train. Intel Mac installed launch and legacy station recovery were checked.
+- Final Windows clean-install and packaged lifecycle checks passed, including idle close, close-to-tray and updater behavior.
+- Manual upgrades from public 0.11.0 and 0.11.1 passed. The actual public **0.11.1 → 0.11.2 Update Center download, install and automatic restart** also passed, preserving the populated test station and credential availability.
+- A populated personal Windows installation passed **534 preservation checks after installation and again after restart**, covering crew, props, conversations, settings and the paused routine. Installed interface smoke passed **9/9**.
+- Final source checks included **771 fast regression steps**, **113 HTTP test steps**, customer journeys and focused graphics, save, routing and installer regressions. The usual extended soak durations were waived for this update in favor of these focused checks.
+- Release tooling now distinguishes installed smoke from soak acceptance, checks visual findings against current evidence, and accounts for legitimate routine catch-up ticks. Shared HTTP gate deadlines and controlled hydration-test timing reduce false test failures without removing checks or changing product timeouts.
+
+Google Workspace connector availability remains deferred while verification is completed. Google login for StarNet billing is separate. Engineering fixes are verified on the reproduced paths; the three historical reports without an established cause remain tracked rather than being claimed as confirmed customer recoveries.
+
+[Full source comparison: 0.11.1 → 0.11.2](https://github.com/androoAGI/starnet/compare/v0.11.1...v0.11.2)

@@ -7,6 +7,59 @@ const line = obj => 'data: ' + JSON.stringify(obj);
 async function collect(provider, req) { const out = []; for await (const e of provider.stream(req)) out.push(e); return out; }
 
 module.exports = (async () => {
+  // Managed Claude must preserve the same continuation ordering as direct OpenRouter.
+  {
+    for (const model of ['anthropic/claude-sonnet-4.6', 'gpt-4o']) {
+      const messages = [{ role: 'system', content: 'Policy' }, { role: 'user', content: 'Write' }, { role: 'assistant', content: 'Written' }, { role: 'system', content: '<verify_before_done>Check the file.</verify_before_done>' }];
+      const original = JSON.stringify(messages);
+      let wire;
+      const fetch = async (url, init) => {
+        if (!url.endsWith('/chat/completions')) return new Response('{"data":[]}');
+        wire = JSON.parse(init.body);
+        return new Response('data: [DONE]\n\n');
+      };
+      await collect(makeOpenAICompatibleProvider({ fetch, key: 'fixture-only', baseUrl: 'https://managed.example.test/v1' }), { model, messages });
+      A.eq(wire.messages.at(-1).role, model.startsWith('anthropic/') ? 'user' : 'system', model + ': managed continuation is not hoisted into forbidden prefill');
+      A.eq(wire.messages[0], messages[0], model + ': leading policy unchanged');
+      A.eq(wire.messages.at(-1).content, messages.at(-1).content, model + ': reminder bytes unchanged');
+      A.eq(JSON.stringify(messages), original, model + ': durable history unchanged');
+    }
+  }
+  // Managed StarNet uses this adapter too. An interrupted history must get the same repair as
+  // direct OpenRouter, before it reaches a strict Chat Completions upstream.
+  {
+    const input = [
+      { role: 'user', content: 'continue' },
+      { role: 'tool', tool_call_id: '', content: 'orphan evidence' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'pending', type: 'function', function: { name: 'fs_read', arguments: '{}' } }] },
+      { role: 'user', content: 'resume after interruption' }
+    ];
+    const original = JSON.stringify(input);
+    let wire;
+    const p = makeOpenAICompatibleProvider({ key: 'fixture-only', baseUrl: 'https://managed.example.test/v1', fetch: async (_url, init) => {
+      if (!init || !init.body) return new Response('{"data":[{"id":"m"}]}');
+      wire = JSON.parse(init.body).messages;
+      const pending = new Set();
+      for (const m of wire) {
+        if (m.role === 'tool') {
+          if (!m.tool_call_id || !pending.delete(m.tool_call_id)) return new Response('{"error":{"message":"Tool message must have either name or tool_call_id"}}', { status: 400 });
+        } else {
+          if (pending.size) return new Response('{"error":{"message":"Missing tool results"}}', { status: 400 });
+          for (const call of m.tool_calls || []) pending.add(call.id);
+        }
+      }
+      if (pending.size) return new Response('{"error":{"message":"Missing tool results"}}', { status: 400 });
+      return new Response(line({ choices: [{ delta: { content: 'recovered' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n');
+    } });
+    const events = await collect(p, { model: 'm', messages: input });
+    A.eq(events.filter(e => e.type === 'text').map(e => e.delta).join(''), 'recovered', 'managed-compatible adapter completes against a strict pair validator');
+    A.ok(wire.some(m => m.role === 'user' && m.content.includes('orphan evidence') && m.content.includes('[recovered tool result')), 'orphan content survives with an honest recovery label');
+    A.ok(wire.some(m => m.role === 'tool' && m.tool_call_id === 'pending' && m.content.includes('[interrupted')), 'interrupted call gets a labeled missing-result record');
+    A.eq(JSON.stringify(input), original, 'wire repair does not mutate the durable caller history');
+    const valid = [{ role: 'user', content: 'hi' }, { role: 'assistant', content: null, tool_calls: [{ id: 'ok', type: 'function', function: { name: 'fs_read', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 'ok', content: 'observed result' }];
+    await collect(p, { model: 'm', messages: valid });
+    A.eq(wire, valid, 'valid tool history reaches the compatible endpoint unchanged');
+  }
   // text, usage, finish, and request/header shape
   {
     const calls = [];
@@ -386,6 +439,23 @@ module.exports = (async () => {
     try { await collect(p, { model: 'm', messages: [] }); } catch (e) { err = e; }
     A.ok(/request starnet_req_9/.test(err && err.message), 'proxy correlation header is retained');
     A.ok(!/abcdefghijklmnop|sk-secretsecret/.test(err && err.message), 'obvious credential-shaped text is redacted');
+  }
+
+  {
+    const { makeDiagnostics } = require('../sidecar/diagnostics.js');
+    const { redact } = require('../sidecar/context.js');
+    const fetchImpl = async () => new Response(JSON.stringify({ error: {
+      message: 'Provider rejected the request. '.repeat(40), request_id: 'relay-correlation-123',
+      upstream_request_id: 'upstream-correlation-456', metadata: { raw: 'PRIVATE PROMPT MUST NOT LEAK' }
+    } }), { status: 400 });
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://managed.test/v1' });
+    let err;
+    try { await collect(p, { model: 'anthropic/claude-sonnet-5', messages: [] }); } catch (e) { err = e; }
+    const receipt = makeDiagnostics({ redact }).assemble({ errors: [{ message: err.message, runId: 'local-run-789' }] });
+    A.ok(receipt.text.includes('relay-correlation-123'), 'relay id survives diagnostic truncation');
+    A.ok(receipt.text.includes('upstream-correlation-456'), 'upstream id survives diagnostic truncation');
+    A.ok(receipt.text.includes('local-run-789'), 'local run remains correlated to this error');
+    A.ok(!receipt.text.includes('PRIVATE PROMPT'), 'raw upstream payload is not copied');
   }
 
   A.report('provider.openai-compatible.test');
